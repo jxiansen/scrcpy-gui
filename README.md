@@ -24,6 +24,7 @@ ScrcpyGUI v4 is a modern, feature-rich GUI for [scrcpy](https://github.com/Genym
   - **HID Mouse**: Zero-lag, high-precision cursor control for a "native desktop" feel.
 - **🖥️ Graphics Renderer Selection**:
   - Choose a renderer backend such as Direct3D, OpenGL, OpenGL ES, Metal, or Software (capability-aware, OS-filtered).
+  - Select host-side hardware decoding (Auto, Disabled, VAAPI, D3D11VA, or VideoToolbox) when scrcpy 5+ supports `--hwdec`.
 - **🌐 Seamless Connectivity**:
   - **Wireless Pairing**: Native UI for Android 11+ wireless pairings.
   - **Connection History**: Remember and reconnect to wireless devices with one click.
@@ -54,12 +55,13 @@ To learn how to enable **USB Debugging**, set up **Wireless Pairing**, or instal
 ## 🛠️ Development
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18+)
+- [Node.js](https://nodejs.org/) 24 LTS (Vite 8 requires `^20.19` or `>=22.12`)
 - [Rust](https://rust-lang.org/) & Cargo
 - [Tauri v2 Prerequisites](https://v2.tauri.app/start/prerequisites/)
+- `scrcpy` 4.1+ (the built-in downloader installs the latest official release; scrcpy 5.x hardware decoding is exposed when the installed binary supports `--hwdec`)
 
 ### Build Instructions
-1. `npm install`
+1. `npm ci`
 2. `npm run tauri dev` (Development)
 3. `npm run tauri build` (Production)
 
@@ -78,6 +80,9 @@ environment.systemPackages = [
   inputs.scrcpy-gui.packages.${pkgs.system}.default
 ];
 ```
+
+> The flake pins a specific release and its hashes; it can lag the latest GitHub release until those hashes are refreshed.
+
 ---
 
 ## 💖 Support the Project

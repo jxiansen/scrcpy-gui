@@ -126,6 +126,14 @@ Renderer choices are **capability-aware**:
 - ScrcpyGUI filters options by your host OS.
 - Unsupported options are hidden automatically (e.g. Metal is only shown on macOS).
 
+### ⚡ Hardware Decoding (scrcpy 5+)
+If your installed scrcpy supports `--hwdec`, the Performance section also shows a **Hardware Decoding** selector.
+
+- **Auto**: Use the first available GPU decoder, falling back to software (scrcpy's default).
+- **Disabled**: Force software decoding if hardware decoding causes artifacts or startup failures.
+- **VAAPI** (Linux), **D3D11VA** (Windows), **VideoToolbox** (macOS): Pick a specific host decoder.
+- The selector is hidden automatically on scrcpy versions that do not advertise `--hwdec`.
+
 ### 📂 File Transfers & APKs
 - **Install Apps**: Just drag an `.apk` file from your PC and drop it anywhere into the ScrcpyGUI window.
 - **Transfer Files**: Drag any file into the window to automatically push it to your device's `/sdcard/Download/` folder.

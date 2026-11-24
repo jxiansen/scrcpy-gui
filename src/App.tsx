@@ -312,7 +312,7 @@ function App() {
             to { opacity: 1; transform: translateY(0); }
           }
         `}</style>
-        <div className="fixed inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 pointer-events-none z-0"></div>
+        <div className="fixed inset-0 bg-[url('/noise.svg')] opacity-20 pointer-events-none z-0"></div>
         <div className="fixed top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-primary/30 via-transparent to-transparent pointer-events-none z-0"></div>
 
         <div className="relative z-10 flex flex-col h-screen transition-all duration-700">

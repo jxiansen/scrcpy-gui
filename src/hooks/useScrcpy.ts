@@ -12,6 +12,8 @@ export interface RenderDriverSupport {
     hostOs: string;
     supportsRenderDriver: boolean;
     supportedDrivers: RenderDriverOption[];
+    /** True when the installed scrcpy advertises `--hwdec` (scrcpy v5+). */
+    supportsHwdec: boolean;
 }
 
 export interface MdnsDevice {
@@ -62,6 +64,9 @@ export interface ScrcpyConfig {
     hidKeyboard?: boolean;
     hidMouse?: boolean;
     renderDriver?: string;
+    /** Host-side video decoder (scrcpy v5+): auto | disabled | vaapi |
+     *  d3d11va | videotoolbox. "auto" is scrcpy's default and sends no flag. */
+    hwdec?: string;
     // v4 features
     flexDisplay?: boolean;
     cameraTorch?: boolean;
@@ -115,7 +120,8 @@ export function useScrcpy() {
     const [renderDriverSupport, setRenderDriverSupport] = useState<RenderDriverSupport>({
         hostOs: 'unknown',
         supportsRenderDriver: false,
-        supportedDrivers: []
+        supportedDrivers: [],
+        supportsHwdec: false
     });
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -146,6 +152,7 @@ export function useScrcpy() {
         aspectRatioLock: true,
         hidKeyboard: false,
         hidMouse: false,
+        hwdec: "auto",
         // v4 features
         flexDisplay: false,
         cameraTorch: false,
@@ -655,20 +662,30 @@ export function useScrcpy() {
                     setRenderDriverSupport({
                         hostOs: renderRes?.hostOs || 'unknown',
                         supportsRenderDriver: !!renderRes?.supportsRenderDriver,
-                        supportedDrivers: Array.isArray(renderRes?.supportedDrivers) ? renderRes.supportedDrivers : []
+                        supportedDrivers: Array.isArray(renderRes?.supportedDrivers) ? renderRes.supportedDrivers : [],
+                        supportsHwdec: !!renderRes?.supportsHwdec
                     });
+                    // A saved hwdec choice from a newer scrcpy must not be sent
+                    // to an older binary that doesn't advertise --hwdec.
+                    if (!renderRes?.supportsHwdec) {
+                        setConfig(prev => (prev.hwdec && prev.hwdec !== 'auto')
+                            ? { ...prev, hwdec: 'auto' }
+                            : prev);
+                    }
                 } catch {
                     setRenderDriverSupport({
                         hostOs: 'unknown',
                         supportsRenderDriver: false,
-                        supportedDrivers: []
+                        supportedDrivers: [],
+                        supportsHwdec: false
                     });
                 }
             } else {
                 setRenderDriverSupport({
                     hostOs: 'unknown',
                     supportsRenderDriver: false,
-                    supportedDrivers: []
+                    supportedDrivers: [],
+                    supportsHwdec: false
                 });
             }
 

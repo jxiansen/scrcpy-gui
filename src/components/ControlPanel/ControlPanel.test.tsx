@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ControlPanel from '.';
@@ -10,13 +10,15 @@ const supportedRenderers: RenderDriverSupport = {
     supportedDrivers: [
         { id: 'direct3d', label: 'D3D11 (Direct3D)' },
         { id: 'opengl', label: 'OpenGL' }
-    ]
+    ],
+    supportsHwdec: true
 };
 
 const unsupportedRenderers: RenderDriverSupport = {
     hostOs: 'windows',
     supportsRenderDriver: false,
-    supportedDrivers: []
+    supportedDrivers: [],
+    supportsHwdec: false
 };
 
 function createConfig(overrides: Partial<ScrcpyConfig> = {}): ScrcpyConfig {
@@ -46,11 +48,16 @@ function renderControlPanel(config: ScrcpyConfig, support: RenderDriverSupport, 
     return setConfig;
 }
 
-async function openRendererSelect(user: ReturnType<typeof userEvent.setup>) {
-    const label = screen.getByText('Graphics Renderer');
+async function openSelect(user: ReturnType<typeof userEvent.setup>, labelText: string) {
+    const label = screen.getByText(labelText);
     const container = label.parentElement as HTMLElement;
     const button = container.querySelector('button') as HTMLButtonElement;
     await user.click(button);
+    return container;
+}
+
+async function openRendererSelect(user: ReturnType<typeof userEvent.setup>) {
+    return openSelect(user, 'Graphics Renderer');
 }
 
 describe('ControlPanel renderer selector', () => {
@@ -67,7 +74,8 @@ describe('ControlPanel renderer selector', () => {
         });
 
         it('shows auto renderer value by default', () => {
-            expect(screen.getByText('Auto')).toBeInTheDocument();
+            const container = screen.getByText('Graphics Renderer').parentElement as HTMLElement;
+            expect(within(container).getByText('Auto')).toBeInTheDocument();
         });
 
         it('shows supported renderer option', async () => {
@@ -93,8 +101,8 @@ describe('ControlPanel renderer selector', () => {
         it('clears renderDriver when selecting auto renderer', async () => {
             const user = userEvent.setup();
             const setConfig = renderControlPanel(createConfig({ renderDriver: 'direct3d' }), supportedRenderers);
-            await openRendererSelect(user);
-            await user.click(screen.getByText('Auto'));
+            const container = await openRendererSelect(user);
+            await user.click(within(container).getByText('Auto'));
             expect(setConfig).toHaveBeenCalledWith(expect.objectContaining({ renderDriver: undefined }));
         });
     });
@@ -118,5 +126,37 @@ describe('ControlPanel renderer selector', () => {
             renderControlPanel(createConfig({ sessionMode: 'desktop' }), supportedRenderers);
             expect(screen.getByText('Graphics Renderer')).toBeInTheDocument();
         });
+    });
+});
+
+describe('ControlPanel hardware decoding selector', () => {
+    it('shows the selector only when scrcpy advertises --hwdec', () => {
+        renderControlPanel(createConfig(), supportedRenderers);
+        expect(screen.getByText('Hardware Decoding')).toBeInTheDocument();
+    });
+
+    it('hides the selector on scrcpy versions without --hwdec', () => {
+        renderControlPanel(createConfig(), unsupportedRenderers);
+        expect(screen.queryByText('Hardware Decoding')).not.toBeInTheDocument();
+    });
+
+    it('offers only decoders that exist on the host OS', async () => {
+        const user = userEvent.setup();
+        renderControlPanel(createConfig(), supportedRenderers);
+        await openSelect(user, 'Hardware Decoding');
+
+        expect(screen.getByText('D3D11VA')).toBeInTheDocument();
+        expect(screen.queryByText('VAAPI')).not.toBeInTheDocument();
+        expect(screen.queryByText('VideoToolbox')).not.toBeInTheDocument();
+    });
+
+    it('defaults to auto and writes the selected decoder to config', async () => {
+        const user = userEvent.setup();
+        const setConfig = renderControlPanel(createConfig(), supportedRenderers);
+        await openSelect(user, 'Hardware Decoding');
+
+        expect(screen.getAllByText('Auto').length).toBeGreaterThan(0);
+        await user.click(screen.getByText('Disabled'));
+        expect(setConfig).toHaveBeenCalledWith(expect.objectContaining({ hwdec: 'disabled' }));
     });
 });

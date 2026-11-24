@@ -544,7 +544,7 @@ pub async fn kill_adb(window: Window, custom_path: Option<String>) -> Result<ser
     #[cfg(target_os = "windows")]
     {
         let _ = TokioCommand::new("taskkill")
-            .args(&["/F", "/IM", "adb.exe", "/T"])
+            .args(["/F", "/IM", "adb.exe", "/T"])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .await;
@@ -661,13 +661,15 @@ pub async fn get_render_drivers(custom_path: Option<String>) -> serde_json::Valu
             let lower = combined.to_lowercase();
 
             let supports_render_driver = lower.contains("--render-driver");
+            let supports_hwdec = lower.contains("--hwdec");
             if !supports_render_driver {
                 return json!({
                     "success": true,
                     "hostOs": host_os,
                     "supportsRenderDriver": false,
-                    "detectedDrivers": [],
                     "supportedDrivers": [],
+                    "detectedDrivers": [],
+                    "supportsHwdec": supports_hwdec,
                     "diagnostics": "scrcpy does not advertise --render-driver in --help output"
                 });
             }
@@ -690,6 +692,7 @@ pub async fn get_render_drivers(custom_path: Option<String>) -> serde_json::Valu
                 "supportsRenderDriver": true,
                 "detectedDrivers": detected_drivers,
                 "supportedDrivers": supported_drivers,
+                "supportsHwdec": supports_hwdec,
                 "diagnostics": "render drivers parsed from scrcpy --help"
             })
         }
@@ -699,6 +702,7 @@ pub async fn get_render_drivers(custom_path: Option<String>) -> serde_json::Valu
             "supportsRenderDriver": false,
             "detectedDrivers": [],
             "supportedDrivers": [],
+            "supportsHwdec": false,
             "message": e.to_string()
         }),
     }
@@ -736,6 +740,9 @@ pub struct ScrcpyConfig {
     hid_keyboard: Option<bool>,
     hid_mouse: Option<bool>,
     render_driver: Option<String>,
+    /// Host-side video decoder (scrcpy v5+). "auto" is the default and sends
+    /// no flag; the other values must be one of HWDEC_VALUES.
+    hwdec: Option<String>,
     // v4 features
     flex_display: Option<bool>,
     camera_torch: Option<bool>,
@@ -756,6 +763,32 @@ pub struct ScrcpyConfig {
     /// Useful when the device reports incorrect encoder limits that prevent
     /// scrcpy from starting.
     ignore_video_encoder_constraints: Option<bool>,
+}
+
+const HWDEC_VALUES: &[&str] = &["disabled", "vaapi", "d3d11va", "videotoolbox"];
+
+fn is_hwdec_allowed_on_os(value: &str) -> bool {
+    match value {
+        "disabled" => true,
+        "vaapi" => cfg!(target_os = "linux"),
+        "d3d11va" => cfg!(target_os = "windows"),
+        "videotoolbox" => cfg!(target_os = "macos"),
+        _ => false,
+    }
+}
+
+/// Return the explicit `--hwdec` value to pass, or None for scrcpy's default
+/// ("auto") / unknown values. Keeping an allowlist here means a corrupted or
+/// hand-edited config can't inject an arbitrary flag value.
+fn resolve_hwdec_flag(config: &ScrcpyConfig) -> Option<&str> {
+    let requested = config.hwdec.as_deref()?.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    HWDEC_VALUES
+        .iter()
+        .find(|value| value.eq_ignore_ascii_case(requested) && is_hwdec_allowed_on_os(value))
+        .copied()
 }
 
 fn resolve_audio_codec_flag<'a>(config: &'a ScrcpyConfig, audio_codec_override: Option<&'a str>) -> Option<&'a str> {
@@ -1147,6 +1180,10 @@ fn build_scrcpy_args(config: &ScrcpyConfig, video_dir_fallback: Option<String>, 
                 args.push("--render-driver".to_string());
                 args.push(selected_driver.to_string());
             }
+        }
+
+        if let Some(hwdec) = resolve_hwdec_flag(config) {
+            args.push(format!("--hwdec={}", hwdec));
         }
 
         if let Some(bitrate) = config.bitrate {
@@ -1665,6 +1702,7 @@ mod tests {
             hid_keyboard: None,
             hid_mouse: None,
             render_driver: None,
+            hwdec: None,
             flex_display: None,
             camera_torch: None,
             camera_zoom: None,
@@ -1673,6 +1711,7 @@ mod tests {
             vsync: None,
             window_x: None,
             window_y: None,
+            ignore_video_encoder_constraints: None,
         }
     }
 
@@ -1709,6 +1748,72 @@ mod tests {
         assert!(args.contains(&"8M".to_string()));
         assert!(args.contains(&"--max-fps".to_string()));
         assert!(args.contains(&"60".to_string()));
+    }
+
+    #[test]
+    fn test_hwdec_default_omits_flag() {
+        let mut config = base_config("mirror");
+        config.hwdec = Some("auto".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--hwdec")));
+    }
+
+    #[test]
+    fn test_hwdec_disabled_adds_flag() {
+        let mut config = base_config("mirror");
+        config.hwdec = Some("disabled".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--hwdec=disabled".to_string()));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_hwdec_d3d11va_allowed_on_windows() {
+        let mut config = base_config("mirror");
+        config.hwdec = Some("d3d11va".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--hwdec=d3d11va".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_hwdec_vaapi_allowed_on_linux() {
+        let mut config = base_config("mirror");
+        config.hwdec = Some("vaapi".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--hwdec=vaapi".to_string()));
+    }
+
+    #[test]
+    fn test_hwdec_invalid_value_is_ignored() {
+        let mut config = base_config("mirror");
+        config.hwdec = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--hwdec")));
+        assert!(!args.contains(&"--no-audio".to_string()));
+    }
+
+    #[test]
+    fn test_windows_arm64_download_uses_native_asset() {
+        assert_eq!(windows_arch_tag("x86_64"), "win64");
+        assert_eq!(windows_arch_tag("aarch64"), "winarm64");
+        assert_eq!(windows_arch_tag("x86"), "win32");
+    }
+
+    #[test]
+    fn test_parse_sha256_manifest_matches_filename() {
+        let manifest = "\
+deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v5.0.1.zip\r\n\
+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef *scrcpy-winarm64-v5.0.1.zip\n";
+        assert_eq!(
+            parse_sha256_manifest(manifest, "scrcpy-win64-v5.0.1.zip"),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string())
+        );
+        assert_eq!(
+            parse_sha256_manifest(manifest, "scrcpy-winarm64-v5.0.1.zip"),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string())
+        );
+        assert_eq!(parse_sha256_manifest(manifest, "missing.zip"), None);
     }
 
     #[test]
@@ -2022,7 +2127,7 @@ pub async fn stop_scrcpy(state: State<'_, ScrcpyState>, device: String) -> Resul
              #[cfg(target_os = "windows")]
              {
                 let _ = StdCommand::new("taskkill")
-                    .args(&["/PID", &pid.to_string()])
+                    .args(["/PID", &pid.to_string()])
                     .creation_flags(CREATE_NO_WINDOW)
                     .output();
              }
@@ -2044,12 +2149,39 @@ pub async fn stop_scrcpy(state: State<'_, ScrcpyState>, device: String) -> Resul
     Ok(())
 }
 
+/// Windows asset suffix published by the scrcpy release workflow.
+fn windows_arch_tag(target_arch: &str) -> &'static str {
+    match target_arch {
+        "x86_64" => "win64",
+        "aarch64" => "winarm64",
+        _ => "win32",
+    }
+}
+
+/// Find the expected lowercase SHA-256 for `filename` in a release's
+/// `SHA256SUMS.txt`. Lines are `<hash>  <filename>` (optionally `*filename`).
+fn parse_sha256_manifest(manifest: &str, filename: &str) -> Option<String> {
+    for line in manifest.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(hash) = parts.next() else { continue };
+        let Some(name) = parts.next() else { continue };
+        if name.trim_start_matches('*') == filename
+            && hash.len() == 64
+            && hash.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Some(hash.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn download_scrcpy(window: Window) -> Result<(), String> {
     use std::io::Write;
+    use sha2::{Digest, Sha256};
     
     let (os_tag, arch_tag, extension) = if cfg!(target_os = "windows") {
-        let arch = if cfg!(target_arch = "x86_64") { "win64" } else { "win32" };
+        let arch = windows_arch_tag(std::env::consts::ARCH);
         (arch, arch, ".zip")
     } else if cfg!(target_os = "linux") {
         ("linux", "linux-x86_64", ".tar.gz")
@@ -2068,6 +2200,7 @@ pub async fn download_scrcpy(window: Window) -> Result<(), String> {
     // Attempt to get the latest release via API, but fallback to redirect scraping if rate limited
     let mut download_url = String::new();
     let mut filename = String::new();
+    let mut release_tag = String::new();
 
     let api_url = "https://api.github.com/repos/Genymobile/scrcpy/releases/latest";
     let api_resp = client.get(api_url).send().await;
@@ -2077,6 +2210,7 @@ pub async fn download_scrcpy(window: Window) -> Result<(), String> {
     if let Ok(resp) = api_resp {
         if resp.status().is_success() {
             if let Ok(json) = resp.json::<serde_json::Value>().await {
+                release_tag = json["tag_name"].as_str().unwrap_or("").to_string();
                 if let Some(assets) = json["assets"].as_array() {
                     for asset in assets {
                         let name = asset["name"].as_str().unwrap_or("");
@@ -2105,6 +2239,7 @@ pub async fn download_scrcpy(window: Window) -> Result<(), String> {
         // URL is like https://github.com/Genymobile/scrcpy/releases/tag/v2.7
         if let Some(tag) = final_url.split('/').next_back() {
             if tag.starts_with('v') {
+                release_tag = tag.to_string();
                 filename = format!("scrcpy-{}-{}{}", arch_tag, tag, extension);
                 download_url = format!("https://github.com/Genymobile/scrcpy/releases/download/{}/{}", tag, filename);
                 window.emit("scrcpy-log", format!("[SYSTEM] Discovered latest tag via fallback: {}", tag)).unwrap();
@@ -2116,7 +2251,47 @@ pub async fn download_scrcpy(window: Window) -> Result<(), String> {
         return Err(format!("Could not find {} binary. (API rate limit might be active)", arch_tag));
     }
 
+    if release_tag.is_empty() {
+        release_tag = download_url
+            .split("/download/")
+            .nth(1)
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or("")
+            .to_string();
+    }
+    if release_tag.is_empty() {
+        return Err("Could not determine the scrcpy release tag for checksum verification".to_string());
+    }
+
     window.emit("scrcpy-log", format!("[SYSTEM] Found asset: {}", filename)).unwrap();
+
+    // Verify the archive against the release's published SHA256SUMS.txt before
+    // extracting or executing anything. Fail closed: an unverifiable download is
+    // not installed.
+    let checksum_url = format!(
+        "https://github.com/Genymobile/scrcpy/releases/download/{}/SHA256SUMS.txt",
+        release_tag
+    );
+    let checksum_resp = client
+        .get(&checksum_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch SHA256SUMS.txt: {}", e))?;
+    if !checksum_resp.status().is_success() {
+        return Err(format!(
+            "Could not fetch SHA256SUMS.txt for {} (HTTP {})",
+            release_tag,
+            checksum_resp.status()
+        ));
+    }
+    let checksum_text = checksum_resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read SHA256SUMS.txt: {}", e))?;
+    let expected_sha256 = parse_sha256_manifest(&checksum_text, &filename)
+        .ok_or_else(|| format!("SHA-256 checksum for {} not found in SHA256SUMS.txt", filename))?;
+
+    window.emit("scrcpy-log", format!("[SYSTEM] Verifying SHA-256 for {}", filename)).unwrap();
     
     let current_dir = std::env::current_exe()
         .ok()
@@ -2133,18 +2308,29 @@ pub async fn download_scrcpy(window: Window) -> Result<(), String> {
         
         window.emit("scrcpy-log", format!("[SYSTEM] Downloading: {} MB", total_size / 1024 / 1024)).unwrap();
 
+        let mut hasher = Sha256::new();
         let mut downloaded: u64 = 0;
         while let Some(chunk) = download_resp.chunk().await.map_err(|e| e.to_string())? {
+            hasher.update(&chunk);
             file.write_all(&chunk).map_err(|e| format!("Failed to write chunk: {}", e))?;
             downloaded += chunk.len() as u64;
-            if total_size > 0 {
-                let percent = (downloaded * 100) / total_size;
+            if let Some(percent) = (downloaded * 100).checked_div(total_size) {
                 let _ = window.emit("download-progress", json!({ "percent": percent }));
             }
         }
+
+        let actual_sha256 = hex::encode(hasher.finalize());
+        if actual_sha256 != expected_sha256 {
+            drop(file);
+            let _ = std::fs::remove_file(&temp_archive_path);
+            return Err(format!(
+                "SHA-256 mismatch for {}: expected {}, got {}",
+                filename, expected_sha256, actual_sha256
+            ));
+        }
     }
-    
-    window.emit("scrcpy-log", "[SYSTEM] Download finished. Starting extraction...").unwrap();
+
+    window.emit("scrcpy-log", "[SYSTEM] SHA-256 verified. Starting extraction...").unwrap();
     window.emit("scrcpy-status", json!({ "type": "downloading", "success": true, "message": "Extracting binaries..." })).unwrap();
 
     if extract_path.exists() {
@@ -2293,7 +2479,7 @@ pub async fn get_latest_scrcpy_version() -> Result<String, String> {
         
         let final_url = redirect_res.url().as_str();
         if let Some(tag) = final_url.split('/').next_back() {
-            if tag.starts_with('v') || tag.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if tag.starts_with('v') || tag.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 tag_name = tag.trim_start_matches('v').to_string();
             }
         }

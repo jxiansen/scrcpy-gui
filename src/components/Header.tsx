@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, FolderOpen, RefreshCcw, Palette, HelpCircle, X, ExternalLink, Languages, ChevronDown, Sun, Moon, Monitor } from 'lucide-react';
-import { SUPPORTED_LOCALES, useI18n, type Locale } from '../i18n';
+import { LANGUAGE_NAMES, SUPPORTED_LOCALES, useI18n, type Locale } from '../i18n';
 
 interface HeaderProps {
     onThemeChange: (theme: string) => void;
@@ -17,7 +17,7 @@ interface HeaderProps {
 }
 
 export default function Header({ onThemeChange, currentTheme, colorMode, onColorModeChange, binaryStatus, onDownload, onSetPath, onResetPath, isDownloading, downloadProgress, version }: HeaderProps) {
-    const { t, locale, setLocale, translations } = useI18n();
+    const { t, locale, setLocale } = useI18n();
     const [showHelp, setShowHelp] = useState(false);
     const [showLangMenu, setShowLangMenu] = useState(false);
     const langMenuRef = useRef<HTMLDivElement>(null);
@@ -143,7 +143,7 @@ export default function Header({ onThemeChange, currentTheme, colorMode, onColor
                         title={t('header.languageLabel')}
                     >
                         <Languages size={12} />
-                        <span className="text-[9px] font-black uppercase tracking-widest">{translations.languages[locale]}</span>
+                        <span className="text-[9px] font-black uppercase tracking-widest">{LANGUAGE_NAMES[locale]}</span>
                         <ChevronDown size={10} className={`transition-transform ${showLangMenu ? 'rotate-180' : ''}`} />
                     </button>
                     {showLangMenu && (
@@ -157,7 +157,7 @@ export default function Header({ onThemeChange, currentTheme, colorMode, onColor
                                     }}
                                     className={`block w-full text-left px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors ${loc === locale ? 'bg-primary/20 text-primary' : 'text-zinc-400 hover:bg-primary hover:text-on-primary'}`}
                                 >
-                                    {translations.languages[loc]}
+                                    {LANGUAGE_NAMES[loc]}
                                 </button>
                             ))}
                         </div>

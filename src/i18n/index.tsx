@@ -10,6 +10,18 @@ import { ar } from './locales/ar';
 
 export type Locale = 'en' | 'fr' | 'pt-BR' | 'zh-CN' | 'zh-TW' | 'ru' | 'id' | 'ar';
 export const SUPPORTED_LOCALES: Locale[] = ['en', 'fr', 'pt-BR', 'zh-CN', 'zh-TW', 'ru', 'id', 'ar'];
+/** Language names are autonyms, so a Chinese user can find 简体中文 even while
+ *  the current UI language is English. */
+export const LANGUAGE_NAMES: Record<Locale, string> = {
+    en: 'English',
+    fr: 'Français',
+    'pt-BR': 'Português (Brasil)',
+    'zh-CN': '简体中文',
+    'zh-TW': '繁體中文',
+    ru: 'Русский',
+    id: 'Bahasa Indonesia',
+    ar: 'العربية'
+};
 const STORAGE_KEY = 'scrcpy_locale';
 const localeBundles: Record<Locale, Translations> = {
     en,

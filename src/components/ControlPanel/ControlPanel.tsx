@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Play, Square, Monitor, Camera, LayoutGrid, ChevronDown, Lock, Unlock, Settings2, Video, ExternalLink, Keyboard, Mouse } from 'lucide-react';
 import { RenderDriverSupport, ScrcpyConfig } from '../../hooks/useScrcpy';
 import Tooltip from '../Tooltip';
-import { buildRendererOptions, mapRendererSelection } from './rendererOptions';
+import { buildHwdecOptions, buildRendererOptions, mapRendererSelection } from './rendererOptions';
 import { useI18n } from '../../i18n';
 
 interface ControlPanelProps {
@@ -75,7 +75,7 @@ export default function ControlPanel({
     isRunning,
     onListOptions,
     detectedCameras = [],
-    renderDriverSupport = { hostOs: 'unknown', supportsRenderDriver: false, supportedDrivers: [] }
+    renderDriverSupport = { hostOs: 'unknown', supportsRenderDriver: false, supportedDrivers: [], supportsHwdec: false }
 }: ControlPanelProps) {
     const { t } = useI18n();
 
@@ -84,8 +84,13 @@ export default function ControlPanel({
     };
 
     const rendererOptions = buildRendererOptions(renderDriverSupport, t('controlPanel.rendererAuto'));
+    const hwdecOptions = buildHwdecOptions(
+        renderDriverSupport.hostOs,
+        t('controlPanel.rendererAuto'),
+        t('controlPanel.hardwareDecodingDisabled')
+    );
 
-    const CustomSelect = ({ value, onChange, options, label, className = "" }: { value: any, onChange: (val: any) => void, options: { value: any, label: string }[], label?: string, className?: string }) => {
+    const CustomSelect = ({ value, onChange, options, label, title, className = "" }: { value: any, onChange: (val: any) => void, options: { value: any, label: string }[], label?: string, title?: string, className?: string }) => {
         const [isOpen, setIsOpen] = useState(false);
         const containerRef = useRef<HTMLDivElement>(null);
 
@@ -106,6 +111,7 @@ export default function ControlPanel({
                 {label && <label className="text-[9px] font-black text-zinc-500 uppercase tracking-tighter mb-1 block">{label}</label>}
                 <button
                     onClick={() => setIsOpen(!isOpen)}
+                    title={title}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-md px-2 py-1.5 text-[11px] text-zinc-300 flex items-center justify-between hover:border-primary/60 hover:bg-black transition-all group"
                 >
                     <span className="truncate">{selectedOption?.label}</span>
@@ -197,6 +203,15 @@ export default function ControlPanel({
                 onChange={(val) => handleChange('renderDriver', mapRendererSelection(val))}
                 options={rendererOptions}
             />
+            {renderDriverSupport.supportsHwdec && (
+                <CustomSelect
+                    label={t('controlPanel.hardwareDecoding')}
+                    title={t('controlPanel.hardwareDecodingTooltip')}
+                    value={config.hwdec || 'auto'}
+                    onChange={(val) => handleChange('hwdec', val)}
+                    options={hwdecOptions}
+                />
+            )}
         </div>
         <Tooltip text={t('controlPanel.vsyncTooltip')}>
             <div

@@ -19,14 +19,16 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    // 1420 falls inside a Windows excluded port range (1326-1425) on some
+    // Hyper-V/WinNAT setups, causing EACCES; 1430 is outside common ranges.
+    port: 1430,
     strictPort: true,
     host: host || false,
     hmr: host
       ? {
         protocol: "ws",
         host,
-        port: 1421,
+        port: 1431,
       }
       : undefined,
     watch: {
