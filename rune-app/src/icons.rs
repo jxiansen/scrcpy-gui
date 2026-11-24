@@ -54,6 +54,14 @@ svg_icon!(
     r#"<rect x="3.5" y="4.5" width="9" height="9" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6 4.5V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5M6 8h4M6 10.5h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>"#
 );
 svg_icon!(
+    PHONE,
+    r#"<rect x="4" y="1.5" width="8" height="13" rx="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M7 2.5h2M7.5 13h1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#
+);
+svg_icon!(
+    GEAR,
+    r#"<circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4 4.8 4.8M11.2 11.2l1.4 1.4M12.6 3.4 11.2 4.8M4.8 11.2 3.4 12.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#
+);
+svg_icon!(
     OFF,
     r#"<rect x="1.5" y="2.5" width="13" height="9" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M3 13 13 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>"#
 );

@@ -149,11 +149,7 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
         .radius(6.0)
         .fill(p.glass)
         .border(1.0, p.border);
-    let mode_labels = [
-        tr("header.colorModes.light"),
-        tr("header.colorModes.dark"),
-        tr("header.colorModes.system"),
-    ];
+    let mode_labels = [tr("header.colorModes.light"), tr("header.colorModes.dark")];
     for (i, label) in mode_labels.iter().enumerate() {
         let active = (i == 0 && !s.dark) || (i == 1 && s.dark);
         modes = modes.child(
@@ -250,10 +246,10 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
                 .child(
                     text(status.to_uppercase())
                         .font(micro(12.0, 900.0, -0.6))
-                        .color(if s.scrcpy_ok == Some(true) {
-                            p.success
-                        } else {
-                            p.warning
+                        .color(match s.scrcpy_ok {
+                            Some(true) => p.success,
+                            Some(false) => p.danger,
+                            None => p.muted,
                         }),
                 ),
         );
@@ -413,13 +409,15 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                         },
                     )
                     .on_press(move |s: &mut Ui| s.select_device(serial.clone()))
+                    .hover(p.primary.alpha(0.06))
+                    .press(p.primary.alpha(0.12))
                     .child(
                         row()
                             .size(26.0, 26.0)
                             .radius(6.0)
                             .center()
                             .fill(if selected { p.primary } else { p.input })
-                            .child(text("▣").font(micro(14.0, 400.0, 0.0)).color(if selected {
+                            .child(icon(&icons::PHONE, 14.0).color(if selected {
                                 p.on_primary
                             } else {
                                 p.subtle
@@ -511,11 +509,22 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         "Pairing code",
         "配对码",
     );
-    let pair_button = ghost(p, tr("sidebar.startPairing"), 10.0, |s: &mut Ui| {
-        let ip = s.pair_ip.text.clone();
-        let code = s.pair_code.text.clone();
-        s.pair(ip, code);
-    });
+    let pair_button = solid_button(
+        p,
+        if s.pairing {
+            tr("sidebar.synchronizing")
+        } else {
+            tr("sidebar.startPairing")
+        },
+        p.primary,
+        p.on_primary,
+        10.0,
+        |s: &mut Ui| {
+            let ip = s.pair_ip.text.clone();
+            let code = s.pair_code.text.clone();
+            s.pair(ip, code);
+        },
+    );
 
     let mut wifi_rows = col().key("wifi").gap(12.0);
     for service in &s.mdns {
@@ -532,6 +541,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                 .fill(p.input.alpha(0.2))
                 .border(1.0, p.border.alpha(0.5))
                 .on_press(move |s: &mut Ui| s.ip.replace_text(address.clone()))
+                .hover(p.primary.alpha(0.06))
+                .press(p.primary.alpha(0.12))
                 .child(
                     text(&service.name)
                         .font(micro(10.0, 700.0, 0.0))
@@ -545,7 +556,11 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
 
     let mut recent = col().key("recent").gap(4.0);
     if s.history.is_empty() {
-        recent = recent.child(text("-").font(mono(9.0)).color(p.subtle));
+        recent = recent.child(
+            text("暂无记录")
+                .font(micro(10.0, 400.0, 0.0))
+                .color(p.subtle),
+        );
     }
     for ip in &s.history {
         let target = ip.clone();
@@ -562,6 +577,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                     s.ip.replace_text(ip.clone());
                     s.connect(ip);
                 })
+                .hover(p.primary.alpha(0.06))
+                .press(p.primary.alpha(0.12))
                 .child(
                     text(ip)
                         .font(micro(10.0, 700.0, 0.0))
@@ -691,7 +708,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                             .child(ip_input)
                             .child(solid_button(
                                 p,
-                                if s.is_refreshing {
+                                if s.connecting {
                                     tr("sidebar.connecting")
                                 } else {
                                     tr("sidebar.connect")
@@ -736,9 +753,22 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         .gap(6.0)
         .padding(12.0)
         .center()
-        .fill(p.glass)
-        .border(2.0, p.border.alpha(0.5))
+        .fill(if s.drop_hover {
+            p.primary.alpha(0.08)
+        } else {
+            p.glass
+        })
+        .border(
+            2.0,
+            if s.drop_hover {
+                p.primary.alpha(0.5)
+            } else {
+                p.border.alpha(0.5)
+            },
+        )
         .radius(12.0)
+        .hover(p.primary.alpha(0.04))
+        .on_drop_hover(|s: &mut Ui, over: bool, _| s.drop_hover = over)
         .on_press_tx(|s: &mut Ui, tx: &mut rune::Tx| {
             let opts = rune::FileDialogOptions {
                 title: t(&s.locale, "sidebar.flashPushFiles").to_string(),
@@ -827,7 +857,7 @@ fn center<F: Fn(&str) -> &'static str>(
                 .gap(8.0)
                 .radius(9.0)
                 .fill(if active {
-                    hex("7c3aed")
+                    p.primary
                 } else {
                     Color::TRANSPARENT
                 })
@@ -867,9 +897,13 @@ fn center<F: Fn(&str) -> &'static str>(
         tr("sidebar.usb")
     };
     let target_line = row().key("session-target").gap(8.0).center_y().child(
-        text(format!("{} · {}", s.config.device, transport))
-            .font(micro(12.0, 500.0, 0.0))
-            .color(p.muted),
+        text(if s.config.device.is_empty() {
+            "未选择设备".to_string()
+        } else {
+            format!("{} · {}", s.config.device, transport)
+        })
+        .font(micro(12.0, 500.0, 0.0))
+        .color(p.muted),
     );
     let action = el()
         .key("start-stop")
@@ -1024,10 +1058,17 @@ fn camera_config<F: Fn(&str) -> &'static str>(
                         .color(p.primary),
                 )
                 .child(
-                    text(tr("controlPanel.webcamProTipTextBefore"))
-                        .font(micro(10.0, 400.0, 0.0))
-                        .color(p.muted)
-                        .wrap(),
+                    text(format!(
+                        "{} {} {} {} {}",
+                        tr("controlPanel.webcamProTipTextBefore"),
+                        tr("controlPanel.webcamProTipObs"),
+                        tr("controlPanel.webcamProTipAndStart"),
+                        tr("controlPanel.webcamProTipVirtualCamera"),
+                        tr("controlPanel.webcamProTipTextAfter")
+                    ))
+                    .font(micro(10.0, 400.0, 0.0))
+                    .color(p.muted)
+                    .wrap(),
                 ),
         )
         .child(
@@ -1393,7 +1434,11 @@ fn right<F: Fn(&str) -> &'static str>(
             s.config.borderless.unwrap_or(false),
             |s| flip(&mut s.config.borderless, false),
         ),
-        ("sessionBehavior.rememberWindowPosition", true, |_| {}),
+        (
+            "sessionBehavior.rememberWindowPosition",
+            s.remember_position,
+            |s: &mut Ui| s.toggle_remember_position(),
+        ),
         (
             "sessionBehavior.recordFeed",
             s.config.record.unwrap_or(false),
@@ -1523,7 +1568,7 @@ fn right<F: Fn(&str) -> &'static str>(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(text("⚙").font(micro(12.0, 400.0, 0.0)).color(p.subtle))
+                .child(icon(&icons::GEAR, 12.0).color(p.subtle))
                 .child(eyebrow(p, tr("sessionBehavior.title"), 10.0)),
             toggles,
         ))
@@ -1764,14 +1809,17 @@ fn onboarding<F: Fn(&str) -> &'static str>(_s: &Ui, p: &Palette, tr: &F) -> El {
                                 .color(p.muted)
                                 .wrap(),
                         )
-                        .child(solid_button(
-                            p,
-                            tr("onboarding.downloadCoreBinaries"),
-                            p.primary,
-                            p.on_primary,
-                            10.0,
-                            |s: &mut Ui| s.download_scrcpy(),
-                        ))
+                        .child(
+                            solid_button(
+                                p,
+                                tr("onboarding.downloadCoreBinaries"),
+                                p.primary,
+                                p.on_primary,
+                                10.0,
+                                |s: &mut Ui| s.download_scrcpy(),
+                            )
+                            .autofocus(),
+                        )
                         .child(
                             text(tr("onboarding.manualSetupFallback"))
                                 .font(micro(11.0, 400.0, 0.0))
@@ -1844,14 +1892,17 @@ fn update_modal<F: Fn(&str) -> &'static str>(
                             10.0,
                             |s: &mut Ui| s.update = None,
                         ))
-                        .child(solid_button(
-                            p,
-                            tr("alerts.updateBtn"),
-                            p.primary,
-                            p.on_primary,
-                            10.0,
-                            |s: &mut Ui| s.update_now(),
-                        )),
+                        .child(
+                            solid_button(
+                                p,
+                                tr("alerts.updateBtn"),
+                                p.primary,
+                                p.on_primary,
+                                10.0,
+                                |s: &mut Ui| s.update_now(),
+                            )
+                            .autofocus(),
+                        ),
                 ),
         )
 }
@@ -1883,14 +1934,12 @@ fn alert_modal(_s: &Ui, p: &Palette, message: &str) -> El {
                         .wrap()
                         .center(),
                 )
-                .child(solid_button(
-                    p,
-                    "OK",
-                    p.primary,
-                    p.on_primary,
-                    10.0,
-                    |s: &mut Ui| s.alert = None,
-                )),
+                .child(
+                    solid_button(p, "OK", p.primary, p.on_primary, 10.0, |s: &mut Ui| {
+                        s.alert = None
+                    })
+                    .autofocus(),
+                ),
         )
 }
 

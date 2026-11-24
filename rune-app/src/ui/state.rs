@@ -138,6 +138,10 @@ pub struct Ui {
     pub update: Option<UpdateInfo>,
     pub onboarding_open: bool,
     pub is_refreshing: bool,
+    pub connecting: bool,
+    pub pairing: bool,
+    pub drop_hover: bool,
+    pub remember_position: bool,
     busy: Arc<AtomicBool>,
     friendly_names: Arc<Mutex<HashMap<String, String>>>,
     last_device_sig: Arc<Mutex<String>>,
@@ -192,6 +196,7 @@ impl Default for Ui {
         let locale: String = prefs.get("locale").unwrap_or_else(|| "zh-CN".into());
         let theme: String = prefs.get("theme").unwrap_or_else(|| "ultraviolet".into());
         let history: Vec<String> = prefs.get("history").unwrap_or_default();
+        let remember_position: bool = prefs.get("remember_position").unwrap_or(true);
         Self {
             runtime,
             state,
@@ -218,6 +223,10 @@ impl Default for Ui {
             update: None,
             onboarding_open: true,
             is_refreshing: false,
+            connecting: false,
+            pairing: false,
+            drop_hover: false,
+            remember_position,
             busy: Arc::new(AtomicBool::new(false)),
             friendly_names: Arc::new(Mutex::new(HashMap::new())),
             last_device_sig: Arc::new(Mutex::new(String::new())),
@@ -322,7 +331,9 @@ impl Ui {
                 }
             }
             "scrcpy-window-pos" => {
-                if let Ok(pos) = serde_json::from_value::<WindowPos>(ev.payload) {
+                if self.remember_position
+                    && let Ok(pos) = serde_json::from_value::<WindowPos>(ev.payload)
+                {
                     self.config.window_x = Some(pos.x);
                     self.config.window_y = Some(pos.y);
                     self.save_config();
@@ -335,7 +346,11 @@ impl Ui {
             }
             "adb-killed" => self.refresh_devices(),
             "refresh-request" => self.refresh_devices(),
-            "refresh-done" => self.is_refreshing = false,
+            "refresh-done" => {
+                self.is_refreshing = false;
+                self.connecting = false;
+            }
+            "pair-done" => self.pairing = false,
             "history-add" => {
                 if let Ok(v) = serde_json::from_value::<IpPayload>(ev.payload) {
                     self.add_history(v.ip);
@@ -432,6 +447,16 @@ impl Ui {
             .take(10)
             .collect();
         let _ = self.prefs.set("history", &self.history);
+    }
+
+    pub fn toggle_remember_position(&mut self) {
+        self.remember_position = !self.remember_position;
+        let _ = self.prefs.set("remember_position", &self.remember_position);
+        if !self.remember_position {
+            self.config.window_x = None;
+            self.config.window_y = None;
+            self.save_config();
+        }
     }
 
     pub fn clear_history(&mut self) {
@@ -629,6 +654,7 @@ impl Ui {
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         self.is_refreshing = true;
+        self.connecting = true;
         self.runtime.spawn(async move {
             let result =
                 commands::adb_connect(sink.clone(), ip.clone(), path.clone(), Some(false)).await;
@@ -651,16 +677,26 @@ impl Ui {
                         )
                         .await;
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let _ = commands::adb_connect(
+                        if let Ok(retry) = commands::adb_connect(
                             sink.clone(),
                             ip.clone(),
                             path.clone(),
                             Some(false),
                         )
-                        .await;
+                        .await
+                        {
+                            let retry_ok = retry
+                                .get("success")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            if retry_ok {
+                                sink.emit("history-add", serde_json::json!({ "ip": ip }));
+                            }
+                        }
+                    } else if ok {
+                        sink.emit("history-add", serde_json::json!({ "ip": ip }));
                     }
                     sink.emit("scrcpy-log", format!("[SYSTEM] {message}"));
-                    sink.emit("history-add", serde_json::json!({ "ip": ip }));
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Err(e) => sink.emit("scrcpy-log", format!("[ADB ERROR] {e}")),
@@ -669,9 +705,10 @@ impl Ui {
         });
     }
 
-    pub fn pair(&self, ip: String, code: String) {
+    pub fn pair(&mut self, ip: String, code: String) {
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
+        self.pairing = true;
         self.runtime.spawn(async move {
             match commands::adb_pair(sink.clone(), ip, code, path).await {
                 Ok(v) => {
@@ -681,6 +718,7 @@ impl Ui {
                 Err(e) => sink.emit("scrcpy-log", format!("[ADB ERROR] {e}")),
             }
             sink.emit("refresh-request", serde_json::json!({}));
+            sink.emit("pair-done", serde_json::json!({}));
         });
     }
 
@@ -697,6 +735,7 @@ impl Ui {
             return;
         }
         self.config.session_mode = self.tab.as_str().into();
+        self.running.insert(self.config.device.clone(), true);
         self.save_config();
         self.log(tv(
             &self.locale,
@@ -711,7 +750,8 @@ impl Ui {
         });
     }
 
-    pub fn stop_session(&self, device: &str) {
+    pub fn stop_session(&mut self, device: &str) {
+        self.running.insert(device.to_string(), false);
         let state = self.state.clone();
         let device = device.to_string();
         self.runtime.spawn(async move {
