@@ -38,3 +38,7 @@ scrcpy_temp.tar.gz
 
 # AI Handoff
 history/
+
+# Rust build output
+target/
+*.pdb
