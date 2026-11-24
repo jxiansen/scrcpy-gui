@@ -68,6 +68,12 @@ impl SessionKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Usb,
+    Wifi,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Download {
     pub active: bool,
@@ -119,6 +125,9 @@ pub struct Ui {
     pub running: BTreeMap<String, bool>,
     pub history: Vec<String>,
     pub tab: SessionKind,
+    pub transport: Transport,
+    pub adb_menu: bool,
+    pub confirm_kill_adb: bool,
     pub ip: TextEdit,
     pub pair_ip: TextEdit,
     pub pair_code: TextEdit,
@@ -196,6 +205,9 @@ impl Default for Ui {
             running: BTreeMap::new(),
             history,
             tab: SessionKind::Mirror,
+            transport: Transport::Usb,
+            adb_menu: false,
+            confirm_kill_adb: false,
             ip: TextEdit::new(""),
             pair_ip: TextEdit::new(""),
             pair_code: TextEdit::new(""),
@@ -233,6 +245,7 @@ impl Ui {
         self.theme = "ultraviolet".into();
         self.locale = "zh-CN".into();
         self.tab = tab;
+        self.transport = Transport::Usb;
         self.config.device = "706fc5a1".into();
         self.config.session_mode = tab.as_str().into();
         self.config.bitrate = Some(8);
@@ -727,6 +740,27 @@ impl Ui {
                 }
             }
         });
+    }
+
+    pub fn set_transport(&mut self, transport: Transport) {
+        self.transport = transport;
+    }
+
+    pub fn toggle_adb_menu(&mut self) {
+        self.adb_menu = !self.adb_menu;
+        if !self.adb_menu {
+            self.confirm_kill_adb = false;
+        }
+    }
+
+    pub fn confirm_kill_adb(&mut self) {
+        if !self.confirm_kill_adb {
+            self.confirm_kill_adb = true;
+            return;
+        }
+        self.confirm_kill_adb = false;
+        self.adb_menu = false;
+        self.kill_adb();
     }
 
     pub fn kill_adb(&self) {

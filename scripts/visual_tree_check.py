@@ -21,30 +21,30 @@ TOL = 0.5
 
 EXPECTED_RECTS = {
     "kit-root/window": [0, 0, 1200, 890],
-    "kit-root/window/header": [0, 0, 1200, 84],
-    "kit-root/window/workspace": [0, 84, 1200, 734],
+    "kit-root/window/header": [0, 0, 1200, 56],
+    "kit-root/window/workspace": [0, 56, 1200, 762],
     "kit-root/window/footer": [0, 818, 1200, 72],
-    "kit-root/window/workspace/sidebar": [24, 100, 270, 710],
-    "kit-root/window/workspace/center": [318, 100, 564, 710],
-    "kit-root/window/workspace/right": [906, 100, 270, 710],
-    "kit-root/window/workspace/center/console": [318, 600, 564, 220],
-    "kit-root/window/workspace/center/engine/#1/start-stop": [328, 528, 544, 52],
+    "kit-root/window/workspace/sidebar": [24, 72, 270, 722],
+    "kit-root/window/workspace/center": [318, 72, 564, 722],
+    "kit-root/window/workspace/right": [906, 72, 270, 722],
+    "kit-root/window/workspace/center/console": [318, 628, 564, 220],
+    "kit-root/window/workspace/center/start-stop": [318, 560, 564, 52],
 }
 
 EXPECTED_FILLS = {
-    "kit-root/window": "#06040aff",       # ultraviolet dark bg
+    "kit-root/window": "#08080aff",       # ultraviolet dark bg
     "kit-root/window/workspace/center/console": "#09090bf0",
-    "kit-root/window/workspace/center/engine/#1/start-stop": "#8b5cf6ff",
+    "kit-root/window/workspace/center/start-stop": "#8b5cf6ff",
 }
 
 EXPECTED_RADII = {
     "kit-root/window/workspace/center/console": 16.0,
-    "kit-root/window/workspace/center/engine/#1/start-stop": 16.0,
+    "kit-root/window/workspace/center/start-stop": 16.0,
 }
 
 EXPECTED_TEXT = {
-    "SCRCPY": {"size": 30.0, "weight": 900.0, "tracking": -1.5, "italic": True},
-    "GUI": {"size": 30.0, "weight": 900.0, "tracking": -1.5, "italic": False},
+    "SCRCPY": {"size": 28.0, "weight": 900.0, "tracking": -1.4, "italic": True},
+    "GUI": {"size": 28.0, "weight": 900.0, "tracking": -1.4, "italic": False},
     "V4.1.0": {"size": 10.0, "weight": 900.0, "tracking": 0.6},
 }
 

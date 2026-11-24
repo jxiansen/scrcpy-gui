@@ -42,12 +42,12 @@ pub struct Palette {
 impl Palette {
     pub fn new(theme: &str, dark: bool) -> Self {
         let (primary, on_primary, dark_bg, light_bg) = match theme {
-            "astro" => (hex("3b82f6"), hex("ffffff"), hex("04050a"), hex("eef4ff")),
+            "astro" => (hex("3b82f6"), hex("ffffff"), hex("06070c"), hex("eef4ff")),
             "carbon" if dark => (hex("ffffff"), hex("09090b"), hex("0a0a0a"), hex("f5f5f4")),
             "carbon" => (hex("1c1917"), hex("fafaf9"), hex("0a0a0a"), hex("f5f5f4")),
             "emerald" => (hex("10b981"), hex("ffffff"), hex("040a08"), hex("ecfdf5")),
             "bloodmoon" => (hex("ef4444"), hex("ffffff"), hex("0a0404"), hex("fff1f2")),
-            _ => (hex("8b5cf6"), hex("ffffff"), hex("06040a"), hex("f5f1ff")),
+            _ => (hex("8b5cf6"), hex("ffffff"), hex("08080a"), hex("f5f1ff")),
         };
         if dark {
             Self {
@@ -55,13 +55,13 @@ impl Palette {
                 on_primary,
                 bg: dark_bg,
                 text: hex("e4e4e7"),
-                muted: hex("a1a1aa"),
-                subtle: hex("71717a"),
-                surface: hex("18181b"),
-                elevated: hex("09090b"),
-                input: hex("27272a"),
-                border: hex("27272a"),
-                border_subtle: hex("3f3f46"),
+                muted: hex("b4b4bd"),
+                subtle: hex("8b8b96"),
+                surface: hex("141417"),
+                elevated: hex("0d0d10"),
+                input: hex("2b2b32"),
+                border: hex("26262c"),
+                border_subtle: hex("45454f"),
                 glass: hex("18181b").alpha(0.6),
                 glass_border: hex("ffffff").alpha(0.05),
                 success: hex("10b981"),
