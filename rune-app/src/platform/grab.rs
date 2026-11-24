@@ -12,8 +12,8 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, 
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-    IsZoomed, PeekMessageW, SetCursorPos, SetWindowsHookExW, SetWindowPos, UnhookWindowsHookEx,
-    HC_ACTION, HHOOK, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, WH_MOUSE_LL,
+    HC_ACTION, HHOOK, IsZoomed, MSG, PM_REMOVE, PeekMessageW, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SetCursorPos, SetWindowPos, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL,
     WM_LBUTTONDOWN,
 };
 

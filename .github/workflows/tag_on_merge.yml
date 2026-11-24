@@ -21,10 +21,10 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - name: Get version from package.json
+      - name: Get version from Cargo.toml
         id: get_version
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rune-app/Cargo.toml | head -1)
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Git Config

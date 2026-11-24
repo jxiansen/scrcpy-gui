@@ -25,6 +25,7 @@ pub fn t(locale: &str, key: &str) -> &'static str {
         "header.notFound" => catalog!(locale, key, "未找到 Scrcpy", "Scrcpy not found"),
         "header.downloading" => catalog!(locale, key, "同步组件", "Syncing Components"),
         "header.install" => catalog!(locale, key, "安装核心", "Install Core"),
+        "header.selectFolder" => catalog!(locale, key, "选择目录", "Folder"),
         "header.language" => catalog!(locale, key, "语言", "Language"),
         "header.theme" => catalog!(locale, key, "主题", "Theme"),
         "header.dark" => catalog!(locale, key, "深色", "Dark"),
@@ -41,14 +42,29 @@ pub fn t(locale: &str, key: &str) -> &'static str {
         "sidebar.connect" => catalog!(locale, key, "连接", "Connect"),
         "sidebar.connecting" => catalog!(locale, key, "连接中…", "Connecting…"),
         "sidebar.ipPlaceholder" => catalog!(locale, key, "192.168.x.x:5555", "192.168.x.x:5555"),
-        "sidebar.discovered" => catalog!(locale, key, "发现的设备 (mDNS)", "Discovered Devices (mDNS)"),
+        "sidebar.discovered" => catalog!(
+            locale,
+            key,
+            "发现的设备 (mDNS)",
+            "Discovered Devices (mDNS)"
+        ),
         "sidebar.recent" => catalog!(locale, key, "最近设备", "Recent Devices"),
         "sidebar.clear" => catalog!(locale, key, "清除", "Clear"),
-        "sidebar.pair" => catalog!(locale, key, "配对设备 (Android 11+)", "Pair Device (Android 11+)"),
+        "sidebar.pair" => catalog!(
+            locale,
+            key,
+            "配对设备 (Android 11+)",
+            "Pair Device (Android 11+)"
+        ),
         "sidebar.pairCode" => catalog!(locale, key, "配对码", "Pairing code"),
         "sidebar.startPairing" => catalog!(locale, key, "开始配对", "Start Pairing"),
         "sidebar.push" => catalog!(locale, key, "闪传 / 推送文件", "Flash / Push Files"),
-        "sidebar.pushSub" => catalog!(locale, key, "点击选择 APK 或任意文件", "Click to pick an APK or any file"),
+        "sidebar.pushSub" => catalog!(
+            locale,
+            key,
+            "点击选择 APK 或任意文件",
+            "Click to pick an APK or any file"
+        ),
         "control.capture" => catalog!(locale, key, "捕获源", "Capture Source"),
         "control.screen" => catalog!(locale, key, "屏幕", "Screen"),
         "control.camera" => catalog!(locale, key, "摄像头", "Camera"),
@@ -65,7 +81,9 @@ pub fn t(locale: &str, key: &str) -> &'static str {
         "control.hwdec" => catalog!(locale, key, "硬件解码", "Hardware Decoding"),
         "control.codec" => catalog!(locale, key, "编码", "Codec"),
         "control.vsync" => catalog!(locale, key, "垂直同步", "VSync"),
-        "control.ignoreConstraints" => catalog!(locale, key, "忽略编码器限制", "Ignore Encoder Constraints"),
+        "control.ignoreConstraints" => {
+            catalog!(locale, key, "忽略编码器限制", "Ignore Encoder Constraints")
+        }
         "control.start" => catalog!(locale, key, "启动任务", "Start Mission"),
         "control.startCamera" => catalog!(locale, key, "启用摄像头", "Engage Camera"),
         "control.startDesktop" => catalog!(locale, key, "进入桌面", "Eject to Desktop"),
@@ -103,7 +121,9 @@ pub fn t(locale: &str, key: &str) -> &'static str {
         "session.record" => catalog!(locale, key, "录制画面", "Record Feed"),
         "session.recordPath" => catalog!(locale, key, "录制路径", "Record Path"),
         "session.change" => catalog!(locale, key, "更改", "Change"),
-        "session.defaultVideos" => catalog!(locale, key, "默认 (视频文件夹)", "Default (Videos Folder)"),
+        "session.defaultVideos" => {
+            catalog!(locale, key, "默认 (视频文件夹)", "Default (Videos Folder)")
+        }
         "log.console" => catalog!(locale, key, "系统控制台", "System Console"),
         "log.report" => catalog!(locale, key, "报告", "Report"),
         "log.clear" => catalog!(locale, key, "清空", "Clear"),
@@ -115,11 +135,28 @@ pub fn t(locale: &str, key: &str) -> &'static str {
         "footer.ui" => catalog!(locale, key, "界面", "UI"),
         "footer.assets" => catalog!(locale, key, "资源", "Assets"),
         "onboarding.title" => catalog!(locale, key, "初始化核心组件", "Setup Core Components"),
-        "onboarding.download" => catalog!(locale, key, "下载核心二进制文件", "Download Core Binaries"),
-        "onboarding.success" => catalog!(locale, key, "成功！二进制文件已就绪", "Success! Binaries Active"),
+        "onboarding.download" => {
+            catalog!(locale, key, "下载核心二进制文件", "Download Core Binaries")
+        }
+        "onboarding.success" => catalog!(
+            locale,
+            key,
+            "成功！二进制文件已就绪",
+            "Success! Binaries Active"
+        ),
         "onboarding.continue" => catalog!(locale, key, "进入应用", "Continue to App"),
-        "onboarding.manual" => catalog!(locale, key, "手动安装：将 scrcpy 与 adb 放入 scrcpy-bin/ 目录", "Manual setup: place scrcpy and adb in scrcpy-bin/"),
-        "alert.noDevice" => catalog!(locale, key, "请先选择一个设备", "Please select a device first"),
+        "onboarding.manual" => catalog!(
+            locale,
+            key,
+            "手动安装：将 scrcpy 与 adb 放入 scrcpy-bin/ 目录",
+            "Manual setup: place scrcpy and adb in scrcpy-bin/"
+        ),
+        "alert.noDevice" => catalog!(
+            locale,
+            key,
+            "请先选择一个设备",
+            "Please select a device first"
+        ),
         "alert.update" => catalog!(locale, key, "发现新版本", "Update available"),
         _ => "?",
     }

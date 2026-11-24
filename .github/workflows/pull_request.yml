@@ -5,120 +5,40 @@ on:
     branches: [ main ]
 
 jobs:
-  lint-and-test:
-    runs-on: ubuntu-22.04
-    env:
-      PKG_CONFIG_ALLOW_CROSS: 1
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-22.04, windows-latest ]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Audit dependencies
-        run: npm audit --audit-level=high
-
-      - name: Lint Frontend
-        run: npm run lint
-
-      - name: Test Frontend
-        run: npm test
-
-      - name: Build Frontend
-        run: npm run build
-
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          components: clippy
+          toolchain: 1.99.1
+          components: clippy, rustfmt
 
-      - name: Rust Cache
+      - name: Rust cache
         uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
 
       - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
+            libudev-dev libasound2-dev
 
-      - name: Lint Backend (Rust)
-        run: cargo clippy --all-targets
-        working-directory: src-tauri
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Test Backend (Rust)
-        run: cargo test
-        working-directory: src-tauri
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
-  windows-check:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
+      - name: Test
+        run: cargo test --all-targets
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Frontend
-        run: npm run build
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Lint Backend (Windows)
-        run: cargo clippy --all-targets
-        working-directory: src-tauri
-
-      - name: Test Backend (Windows)
-        run: cargo test
-        working-directory: src-tauri
-
-  build-check:
-    runs-on: ubuntu-22.04
-    env:
-      PKG_CONFIG_ALLOW_CROSS: 1
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
-
-      - name: Rust Cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Build Check
-        run: npm run tauri build -- --no-bundle
+      - name: Build
+        run: cargo build --all-targets

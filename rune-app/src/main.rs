@@ -4,6 +4,13 @@
 //! window and event loop; `backend::commands` keeps the scrcpy/adb logic and
 //! emits events into a channel that `Ui::poll` drains on the UI thread.
 
+// The command layer was ported wholesale; some helpers are kept for the next
+// wiring pass (friendly names, update modal, report export).
+#![allow(dead_code)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::items_after_test_module)]
+#![allow(clippy::too_many_arguments)]
+
 mod backend;
 mod i18n;
 mod platform;
@@ -28,8 +35,8 @@ fn main() {
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)
     };
 
-    let mut app = rune::App::new(spec)
-        .global_shortcut("ctrl+alt+shift+c", platform::shortcuts::recenter);
+    let mut app =
+        rune::App::new(spec).global_shortcut("ctrl+alt+shift+c", platform::shortcuts::recenter);
 
     #[cfg(target_os = "windows")]
     {

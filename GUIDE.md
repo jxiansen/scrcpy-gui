@@ -2,6 +2,10 @@
 
 This guide provides everything you need to know to get started with ScrcpyGUI, from initial setup to advanced feature usage.
 
+> The v4 GUI is now a native Rune app. Device setup, wireless pairing and scrcpy
+> hotkeys still apply as described below; menu labels may differ slightly from
+> the screenshots, which were taken before the native rewrite.
+
 ---
 
 ## 📋 Table of Contents

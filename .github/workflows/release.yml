@@ -13,51 +13,45 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
-            args: '--target universal-apple-darwin'
-          - platform: 'ubuntu-22.04'
-            args: ''
-          - platform: 'windows-latest'
-            args: ''
-
-    runs-on: ${{ matrix.platform }}
-    env:
-      PKG_CONFIG_ALLOW_CROSS: 1
+          - os: ubuntu-22.04
+            asset: scrcpy-gui-linux-x86_64
+          - os: windows-latest
+            asset: scrcpy-gui-windows-x86_64.exe
+          - os: macos-latest
+            asset: scrcpy-gui-macos
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+          toolchain: 1.99.1
 
-      - name: Rust Cache
+      - name: Rust cache
         uses: swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
 
-      - name: Install Linux dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev
+          sudo apt-get install -y build-essential pkg-config libssl-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
+            libudev-dev libasound2-dev
 
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Build release binary
+        run: cargo build --release -p scrcpy-gui
 
-      - uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage asset (Unix)
+        if: runner.os != 'Windows'
+        run: cp target/release/scrcpy-gui ${{ matrix.asset }}
+
+      - name: Stage asset (Windows)
+        if: runner.os == 'Windows'
+        run: copy target\release\scrcpy-gui.exe ${{ matrix.asset }}
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: v__VERSION__ # tauri-action replaces this with the app version
-          releaseName: 'ScrcpyGUI v__VERSION__'
-          releaseBody: 'See the assets below for the release.'
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          draft: true
+          files: ${{ matrix.asset }}

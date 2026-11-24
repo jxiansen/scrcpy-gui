@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::backend::{commands, AppEvent, EventSink, ScrcpyConfig, SharedState};
+use crate::backend::{AppEvent, EventSink, ScrcpyConfig, SharedState, commands};
 
 const PREFS_ID: &str = "com.kb.scrcpy-gui";
 
@@ -68,7 +68,6 @@ struct ScrcpyCheck {
 
 #[derive(Deserialize)]
 struct WindowPos {
-    device: String,
     x: i32,
     y: i32,
 }
@@ -165,6 +164,8 @@ impl Ui {
         self.sink.set_waker(waker.clone());
         self.waker = Some(waker);
         self.log("[SYSTEM] ScrcpyGUI ready".into());
+        #[cfg(target_os = "windows")]
+        crate::platform::grab::register(self.state.clone());
         self.check_scrcpy();
         self.refresh_devices();
     }
@@ -192,6 +193,7 @@ impl Ui {
                     self.scrcpy_message = v.message;
                     if v.found {
                         self.onboarding_open = false;
+                        self.check_update();
                     }
                 }
             }
@@ -210,7 +212,10 @@ impl Ui {
             "adb-killed" => self.refresh_devices(),
             "update-available" => {
                 if let Ok(v) = serde_json::from_value::<UpdateInfo>(ev.payload) {
-                    self.alert = Some(format!("Scrcpy update available: {} → {}", v.local, v.latest));
+                    self.alert = Some(format!(
+                        "Scrcpy update available: {} → {}",
+                        v.local, v.latest
+                    ));
                 }
             }
             "mdns-list" => {
@@ -223,22 +228,34 @@ impl Ui {
     }
 
     fn handle_status(&mut self, p: &Value) {
-        if let (Some(device), Some(running)) = (p.get("device").and_then(Value::as_str), p.get("running").and_then(Value::as_bool)) {
+        if let (Some(device), Some(running)) = (
+            p.get("device").and_then(Value::as_str),
+            p.get("running").and_then(Value::as_bool),
+        ) {
             self.running.insert(device.to_string(), running);
             return;
         }
         match p.get("type").and_then(Value::as_str).unwrap_or("") {
             "downloading" => {
                 self.download.active = true;
-                self.download.message = p.get("message").and_then(Value::as_str).unwrap_or("").into();
+                self.download.message = p
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into();
             }
             "download-progress" => {
-                self.download.percent = p.get("percent").and_then(Value::as_u64).unwrap_or(0) as u32;
+                self.download.percent =
+                    p.get("percent").and_then(Value::as_u64).unwrap_or(0) as u32;
             }
             "download-complete" => {
                 self.download.active = false;
                 self.download.success = p.get("success").and_then(Value::as_bool).unwrap_or(false);
-                self.download.message = p.get("message").and_then(Value::as_str).unwrap_or("").into();
+                self.download.message = p
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into();
                 self.check_scrcpy();
             }
             _ => {}
@@ -276,8 +293,15 @@ impl Ui {
         self.runtime.spawn(async move {
             let v = commands::check_scrcpy(path).await;
             let found = v.get("found").and_then(Value::as_bool).unwrap_or(false);
-            let message = v.get("message").and_then(Value::as_str).unwrap_or("").to_string();
-            sink.emit("scrcpy-check", serde_json::json!({ "found": found, "message": message }));
+            let message = v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            sink.emit(
+                "scrcpy-check",
+                serde_json::json!({ "found": found, "message": message }),
+            );
         });
     }
 
@@ -287,12 +311,18 @@ impl Ui {
         self.runtime.spawn(async move {
             let v = commands::get_devices(path).await;
             if v.get("error").and_then(Value::as_bool).unwrap_or(false) {
-                let message = v.get("message").and_then(Value::as_str).unwrap_or("ADB error");
+                let message = v
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ADB error");
                 sink.emit("scrcpy-log", format!("[ADB ERROR] {message}"));
                 sink.emit("device-list", Vec::<Device>::new());
                 return;
             }
-            let models = v.get("deviceModels").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let models = v
+                .get("deviceModels")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
             let devices: Vec<Device> = v
                 .get("devices")
                 .and_then(Value::as_array)
@@ -341,12 +371,23 @@ impl Ui {
             }
             let v = commands::get_devices(None).await;
             if let Some(devices) = v.get("devices").and_then(Value::as_array) {
-                let serials: Vec<String> = devices.iter().filter_map(Value::as_str).map(str::to_string).collect();
-                let models = v.get("deviceModels").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let serials: Vec<String> = devices
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                let models = v
+                    .get("deviceModels")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
                 let list: Vec<Device> = serials
                     .into_iter()
                     .map(|s| Device {
-                        model: models.get(&s).and_then(Value::as_str).unwrap_or(&s).to_string(),
+                        model: models
+                            .get(&s)
+                            .and_then(Value::as_str)
+                            .unwrap_or(&s)
+                            .to_string(),
                         serial: s,
                     })
                     .collect();
@@ -442,7 +483,14 @@ impl Ui {
         let text = path.to_string_lossy().to_string();
         self.runtime.spawn(async move {
             let apk = text.to_lowercase().ends_with(".apk");
-            sink.emit("scrcpy-log", format!("[SYSTEM] {} {}", if apk { "Installing" } else { "Pushing" }, text));
+            sink.emit(
+                "scrcpy-log",
+                format!(
+                    "[SYSTEM] {} {}",
+                    if apk { "Installing" } else { "Pushing" },
+                    text
+                ),
+            );
             let v = if apk {
                 commands::install_apk(device, text, custom).await
             } else {
@@ -459,10 +507,22 @@ impl Ui {
         let path = self.config.scrcpy_path.clone();
         self.runtime.spawn(async move {
             let v = commands::check_scrcpy_update(path).await;
-            if v.get("update_available").and_then(Value::as_bool).unwrap_or(false) {
-                let local = v.get("local_version").and_then(Value::as_str).unwrap_or("?");
-                let latest = v.get("latest_version").and_then(Value::as_str).unwrap_or("?");
-                sink.emit("update-available", serde_json::json!({ "local": local, "latest": latest }));
+            if v.get("update_available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let local = v
+                    .get("local_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let latest = v
+                    .get("latest_version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                sink.emit(
+                    "update-available",
+                    serde_json::json!({ "local": local, "latest": latest }),
+                );
             }
         });
     }
@@ -491,4 +551,3 @@ impl Ui {
         self.save_config();
     }
 }
-
