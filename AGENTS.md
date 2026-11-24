@@ -15,6 +15,10 @@ Node toolchain, and no mocked backend.
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check` —
   CI checks.
 - `cargo build --release -p scrcpy-gui` — release binary.
+- `python scripts/visual_tree_check.py compare-dark` — structural visual gate:
+  renders a deterministic fixture scene and asserts key rects, colours and type
+  from Rune's `--tree`. Scenes: `compare-dark`, `compare-light`,
+  `compare-camera`, `compare-desktop`.
 
 Rust 1.99.1 is pinned in `rust-toolchain.toml` (Rune requires it). Do not bump
 the `windows` crate independently of Rune's patched dependency set.

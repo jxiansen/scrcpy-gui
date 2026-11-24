@@ -42,3 +42,6 @@ jobs:
 
       - name: Build
         run: cargo build --all-targets
+
+      - name: Structural visual check
+        run: python scripts/visual_tree_check.py compare-dark

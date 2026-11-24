@@ -544,6 +544,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
     }
 
     let hub = section(
+        "hub",
         p,
         12.0,
         row()
@@ -747,6 +748,7 @@ fn center<F: Fn(&str) -> &'static str>(
     }
 
     let capture = section(
+        "capture",
         p,
         10.0,
         text(tr("controlPanel.captureSource").to_uppercase())
@@ -807,6 +809,7 @@ fn center<F: Fn(&str) -> &'static str>(
         .gap(10.0)
         .child(capture)
         .child(section(
+            "engine",
             p,
             10.0,
             row()
@@ -1232,7 +1235,7 @@ fn right<F: Fn(&str) -> &'static str>(
     layer: &mut Vec<El>,
     tr: &F,
 ) -> El {
-    let mut toggles = col().key("behavior").gap(2.0);
+    let mut toggles = col().key("behavior-list").gap(2.0);
     let rows: [ToggleRow; 9] = [
         (
             "sessionBehavior.stayAwake",
@@ -1337,7 +1340,7 @@ fn right<F: Fn(&str) -> &'static str>(
             ),
     );
 
-    let mut shortcuts = col().key("shortcuts").gap(4.0);
+    let mut shortcuts = col().key("shortcuts-grid").gap(4.0);
     let keys = [
         ("Alt+F", tr("shortcuts.full")),
         ("Alt+H", tr("shortcuts.home")),
@@ -1375,6 +1378,7 @@ fn right<F: Fn(&str) -> &'static str>(
         .gap(16.0)
         .shrink()
         .child(section(
+            "behavior",
             p,
             16.0,
             row()
@@ -1385,6 +1389,7 @@ fn right<F: Fn(&str) -> &'static str>(
             toggles,
         ))
         .child(section(
+            "shortcuts",
             p,
             16.0,
             row()
@@ -1415,9 +1420,13 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                 .gap(12.0)
                 .pl(12.0)
                 .child(
-                    text(chrono::Local::now().format("%H:%M:%S").to_string())
-                        .font(mono(11.0))
-                        .color(p.subtle),
+                    text(if s.fixture {
+                        "12:34:56".to_string()
+                    } else {
+                        chrono::Local::now().format("%H:%M:%S").to_string()
+                    })
+                    .font(mono(11.0))
+                    .color(p.subtle),
                 )
                 .child(text(line.clone()).font(mono(11.0)).color(p.text).wrap()),
         );
@@ -1743,9 +1752,9 @@ fn alert_modal(_s: &Ui, p: &Palette, message: &str) -> El {
         )
 }
 
-fn section(p: &Palette, padding: f32, title: El, body: El) -> El {
+fn section(key: &str, p: &Palette, padding: f32, title: El, body: El) -> El {
     col()
-        .key("section")
+        .key(key)
         .gap(8.0)
         .padding(padding)
         .fill(p.glass)

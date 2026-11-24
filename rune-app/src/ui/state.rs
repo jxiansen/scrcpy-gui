@@ -143,6 +143,8 @@ pub struct Ui {
     pub download: Download,
     pub waker: Option<Waker>,
     pub noise: rune::Pixels,
+    /// Set by `--scene compare-*`; freezes all asynchronous data for deterministic rendering.
+    pub fixture: bool,
 }
 
 fn default_config() -> ScrcpyConfig {
@@ -218,14 +220,49 @@ impl Default for Ui {
             download: Download::default(),
             waker: None,
             noise: noise_texture(),
+            fixture: false,
         }
     }
 }
 
 impl Ui {
+    /// Fixed data for `cargo run -- --scene compare-*`; no ADB, no clock, no prefs.
+    pub fn apply_fixture(&mut self, light: bool, tab: SessionKind) {
+        self.fixture = true;
+        self.dark = !light;
+        self.theme = "ultraviolet".into();
+        self.locale = "zh-CN".into();
+        self.tab = tab;
+        self.config.device = "706fc5a1".into();
+        self.config.session_mode = tab.as_str().into();
+        self.config.bitrate = Some(8);
+        self.scrcpy_ok = Some(true);
+        self.scrcpy_message = "SCRCPY READY".into();
+        self.onboarding_open = false;
+        self.devices = vec![Device {
+            serial: "706fc5a1".into(),
+            model: "PJA110".into(),
+            friendly: Some("PJA110".into()),
+        }];
+        self.mdns = vec![MdnsService {
+            name: "adb-616f16f3c-YnOIRI".into(),
+            service: "_adb-tls-connect._tcp".into(),
+            address: "172.16.1.145:38517".into(),
+        }];
+        self.logs = vec![
+            "[SYSTEM] ScrcpyGUI ready".into(),
+            "[SYSTEM] Device: PJA110".into(),
+        ];
+        self.ip.replace_text("192.168.x.x:5555");
+        self.pair_ip.replace_text("192.168.x.x:55");
+    }
+
     pub fn setup(&mut self, waker: Waker) {
         self.sink.set_waker(waker.clone());
         self.waker = Some(waker);
+        if self.fixture {
+            return;
+        }
         self.log("[SYSTEM] ScrcpyGUI ready".into());
         #[cfg(target_os = "windows")]
         crate::platform::grab::register(self.state.clone());

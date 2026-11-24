@@ -20,6 +20,23 @@ mod ui;
 use rune::{AppSpec, Tx, Waker};
 
 use crate::ui::Ui;
+use crate::ui::state::SessionKind;
+
+fn scene_dark(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Mirror);
+}
+
+fn scene_light(s: &mut Ui) {
+    s.apply_fixture(true, SessionKind::Mirror);
+}
+
+fn scene_camera(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Camera);
+}
+
+fn scene_desktop(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Desktop);
+}
 
 fn setup(ui: &mut Ui, waker: Waker) {
     ui.setup(waker);
@@ -33,6 +50,12 @@ fn main() {
     let spec = AppSpec::<Ui> {
         setup: Some(setup),
         poll: Some(poll),
+        scenes: &[
+            ("compare-dark", scene_dark),
+            ("compare-light", scene_light),
+            ("compare-camera", scene_camera),
+            ("compare-desktop", scene_desktop),
+        ],
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)
     };
 
