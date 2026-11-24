@@ -42,3 +42,6 @@ history/
 # Rust build output
 target/
 *.pdb
+
+# Generated visual diff reports
+tests/visual/out/

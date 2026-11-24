@@ -45,3 +45,8 @@ jobs:
 
       - name: Structural visual check
         run: python scripts/visual_tree_check.py compare-dark
+
+      # Font rasterisation is platform-specific; goldens were captured on Windows.
+      - name: Golden image regression (Windows)
+        if: runner.os == 'Windows'
+        run: python scripts/visual_image_check.py --max-mae 8

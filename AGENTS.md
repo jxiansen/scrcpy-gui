@@ -19,6 +19,9 @@ Node toolchain, and no mocked backend.
   renders a deterministic fixture scene and asserts key rects, colours and type
   from Rune's `--tree`. Scenes: `compare-dark`, `compare-light`,
   `compare-camera`, `compare-desktop`.
+- `python scripts/visual_image_check.py` — golden PNG regression (use `--bless`
+  to update goldens); `python scripts/visual_diff.py A.png B.png` — generic PNG
+  diff. See `tests/visual/README.md` for the old-vs-new differential procedure.
 
 Rust 1.99.1 is pinned in `rust-toolchain.toml` (Rune requires it). Do not bump
 the `windows` crate independently of Rune's patched dependency set.
