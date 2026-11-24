@@ -342,7 +342,7 @@ impl Ui {
         }
     }
 
-    fn log(&mut self, text: String) {
+    pub fn log(&mut self, text: String) {
         for line in text.split('\n') {
             if !line.trim().is_empty() {
                 self.logs.push(line.to_string());
