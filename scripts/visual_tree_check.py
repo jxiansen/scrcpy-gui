@@ -22,13 +22,13 @@ TOL = 0.5
 EXPECTED_RECTS = {
     "kit-root/window": [0, 0, 1200, 890],
     "kit-root/window/header": [0, 0, 1200, 84],
-    "kit-root/window/workspace": [0, 84, 1200, 716],
-    "kit-root/window/footer": [0, 800, 1200, 90],
-    "kit-root/window/workspace/sidebar": [24, 100, 270, 692],
-    "kit-root/window/workspace/center": [318, 100, 564, 692],
-    "kit-root/window/workspace/right": [906, 100, 270, 692],
-    "kit-root/window/workspace/center/console": [318, 579, 564, 220],
-    "kit-root/window/workspace/center/engine/#1/start-stop": [328, 507, 544, 52],
+    "kit-root/window/workspace": [0, 84, 1200, 734],
+    "kit-root/window/footer": [0, 818, 1200, 72],
+    "kit-root/window/workspace/sidebar": [24, 100, 270, 710],
+    "kit-root/window/workspace/center": [318, 100, 564, 710],
+    "kit-root/window/workspace/right": [906, 100, 270, 710],
+    "kit-root/window/workspace/center/console": [318, 600, 564, 220],
+    "kit-root/window/workspace/center/engine/#1/start-stop": [328, 528, 544, 52],
 }
 
 EXPECTED_FILLS = {
@@ -129,6 +129,11 @@ def main() -> int:
         and (e["text"] == "?" or e["text"].startswith(RAW_KEY_PREFIXES))
     ]
     check("no untranslated/raw-key text", leaked, [])
+
+    diamonds = [e.get("text") for e in elements if e.get("text") == "◆"]
+    check("no missing-glyph diamonds in shortcut grid", diamonds, [])
+    targets = [e for e in elements if e.get("text") == "706fc5a1 · USB"]
+    check("session target line present", len(targets) > 0, True)
 
     if failures:
         print(f"FAIL [{scene}] {len(failures)} of {checked} checks failed:")

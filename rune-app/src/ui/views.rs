@@ -1,10 +1,11 @@
 //! Pixel-oriented port of the old React/Tailwind interface to Rune.
 //! Geometry, colours and type scale follow the CSS at commit c4e8721.
 
-use rune::{Color, Cx, El, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{Color, Cx, El, ScrollSpec, TextStyle, col, el, icon, row, text};
 use rune_kit::{Kit, PaletteSeed, Select, SelectAppearance, TextInput};
 
 use crate::i18n::{language_name, t, tv};
+use crate::icons;
 use crate::theme::{Palette, THEMES, hex};
 use crate::ui::state::{SessionKind, Ui};
 
@@ -473,14 +474,22 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         .child(segment(p, tr("sidebar.usb"), false, |_| {}))
         .child(segment(p, tr("sidebar.wifi"), true, |_| {}));
 
-    let ip_input = input(p, k, &s.ip, tr("sidebar.ipPlaceholder"), "IP");
-    let pair_ip = input(p, k, &s.pair_ip, tr("sidebar.ipPlaceholder"), "Pair IP");
+    let ip_input = input(p, k, &s.ip, tr("sidebar.ipPlaceholder"), "IP", "IP 地址");
+    let pair_ip = input(
+        p,
+        k,
+        &s.pair_ip,
+        tr("sidebar.ipPlaceholder"),
+        "Pair IP",
+        "IP 地址",
+    );
     let pair_code = input(
         p,
         k,
         &s.pair_code,
         tr("sidebar.pairingCodePlaceholder"),
         "Pairing code",
+        "配对码",
     );
 
     let mut wifi_rows = col().key("wifi").gap(12.0);
@@ -587,7 +596,11 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                             tr("sidebar.usbSetupTipTextAfter")
                         ),
                     ))
-                    .child(section_label(p, tr("sidebar.ipConnect"), false))
+                    .child(section_label(
+                        p,
+                        &format!("1. {}", tr("sidebar.ipConnect")),
+                        false,
+                    ))
                     .child(
                         row()
                             .gap(6.0)
@@ -716,32 +729,29 @@ fn center<F: Fn(&str) -> &'static str>(
             SessionKind::Desktop => tr("controlPanel.desktop"),
         };
         let active = s.tab == mode;
+        let ico: &rune::Icon = match mode {
+            SessionKind::Mirror => &icons::MONITOR,
+            SessionKind::Camera => &icons::CAMERA,
+            SessionKind::Desktop => &icons::GRID,
+        };
         source = source.child(
             col()
                 .key(format!("source-{:?}", mode))
                 .grow(1.0)
-                .h(42.0)
+                .h(44.0)
                 .center()
-                .gap(6.0)
-                .radius(8.0)
+                .gap(5.0)
+                .radius(9.0)
                 .fill(if active {
-                    p.primary
+                    hex("7c3aed")
                 } else {
                     Color::TRANSPARENT
                 })
                 .on_press(move |s: &mut Ui| s.tab = mode)
-                .child(
-                    text(match mode {
-                        SessionKind::Mirror => "▣",
-                        SessionKind::Camera => "◉",
-                        SessionKind::Desktop => "▦",
-                    })
-                    .font(micro(18.0, 700.0, 0.0))
-                    .color(if active { p.on_primary } else { p.muted }),
-                )
+                .child(icon(ico, 14.0).color(if active { p.on_primary } else { p.muted }))
                 .child(
                     text(label.to_uppercase())
-                        .font(micro(9.0, 900.0, 0.9))
+                        .font(TextStyle::new(12.0, 600.0).lh(16.0))
                         .color(if active { p.on_primary } else { p.muted }),
                 ),
         );
@@ -767,6 +777,16 @@ fn center<F: Fn(&str) -> &'static str>(
             SessionKind::Desktop => tr("controlPanel.ejectToDesktop"),
         }
     };
+    let transport = if s.config.device.contains(':') {
+        tr("sidebar.wifi")
+    } else {
+        tr("sidebar.usb")
+    };
+    let target_line = row().key("session-target").gap(8.0).center_y().child(
+        text(format!("{} · {}", s.config.device, transport))
+            .font(micro(12.0, 500.0, 0.0))
+            .color(p.muted),
+    );
     let action = el()
         .key("start-stop")
         .h(52.0)
@@ -812,18 +832,32 @@ fn center<F: Fn(&str) -> &'static str>(
             "engine",
             p,
             10.0,
-            row()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(tr("controlPanel.engineConfiguration").to_uppercase())
-                        .font(micro(11.0, 900.0, 1.1))
-                        .color(p.muted),
-                )
-                .child(row().grow(1.0))
-                .child(badge(p, tr("controlPanel.active"), p.success))
-                .child(badge(p, tr("controlPanel.otgOnly"), p.danger)),
-            col().gap(6.0).child(config).child(action),
+            {
+                let mut head = row()
+                    .gap(8.0)
+                    .center_y()
+                    .child(
+                        text(tr("controlPanel.engineConfiguration").to_uppercase())
+                            .font(micro(11.0, 900.0, 1.1))
+                            .color(p.muted),
+                    )
+                    .child(row().grow(1.0));
+                if running {
+                    head = head.child(badge(p, tr("controlPanel.active"), p.success));
+                }
+                let otg = s.config.otg_pure.unwrap_or(false)
+                    && (s.config.hid_keyboard.unwrap_or(false)
+                        || s.config.hid_mouse.unwrap_or(false));
+                if otg {
+                    head = head.child(badge(p, tr("controlPanel.otgOnly"), p.danger));
+                }
+                head
+            },
+            col()
+                .gap(6.0)
+                .child(target_line)
+                .child(config)
+                .child(action),
         ))
         .child(log_panel(s, p, tr))
         .scroll(ScrollSpec {
@@ -1341,32 +1375,47 @@ fn right<F: Fn(&str) -> &'static str>(
     );
 
     let mut shortcuts = col().key("shortcuts-grid").gap(4.0);
-    let keys = [
-        ("Alt+F", tr("shortcuts.full")),
-        ("Alt+H", tr("shortcuts.home")),
-        ("Alt+B", tr("shortcuts.back")),
-        ("Alt+S", tr("shortcuts.recents")),
-        ("Alt+P", tr("shortcuts.power")),
-        ("Alt+R", tr("shortcuts.rotate")),
-        ("Alt+V", tr("shortcuts.paste")),
-        ("Alt+O", tr("shortcuts.off")),
+    let keys: [(&str, &str, &rune::Icon); 8] = [
+        ("F", tr("shortcuts.full"), &icons::FULLSCREEN),
+        ("H", tr("shortcuts.home"), &icons::HOME),
+        ("B", tr("shortcuts.back"), &icons::BACK),
+        ("S", tr("shortcuts.recents"), &icons::RECENTS),
+        ("P", tr("shortcuts.power"), &icons::POWER),
+        ("R", tr("shortcuts.rotate"), &icons::ROTATE),
+        ("V", tr("shortcuts.paste"), &icons::PASTE),
+        ("O", tr("shortcuts.off"), &icons::OFF),
     ];
-    for pair in keys.chunks(4) {
+    for pair in keys.chunks(2) {
         let mut r = row().gap(8.0);
-        for (key, label) in pair {
+        for (key, label, ico) in pair {
             r = r.child(
-                col()
+                row()
                     .key(*key)
-                    .w(52.0)
-                    .h(44.0)
-                    .center()
-                    .gap(4.0)
+                    .h(36.0)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(8.0)
+                    .px(8.0)
+                    .center_y()
                     .fill(p.elevated.alpha(0.3))
                     .radius(8.0)
-                    .child(text("◆").font(micro(14.0, 400.0, 0.0)).color(p.subtle))
-                    .child(text(*key).font(micro(9.0, 900.0, 0.5)).color(p.muted)),
+                    .child(
+                        row()
+                            .size(24.0, 24.0)
+                            .center()
+                            .radius(6.0)
+                            .fill(p.input)
+                            .child(icon(ico, 14.0).color(p.muted)),
+                    )
+                    .child(
+                        text(*label)
+                            .font(micro(12.0, 500.0, 0.0))
+                            .color(p.muted)
+                            .grow(1.0)
+                            .truncate(),
+                    )
+                    .child(text(*key).font(micro(10.0, 500.0, 0.0)).color(p.subtle)),
             );
-            let _ = label;
         }
         shortcuts = shortcuts.child(r);
     }
@@ -1395,8 +1444,8 @@ fn right<F: Fn(&str) -> &'static str>(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(text("⌨").font(micro(12.0, 400.0, 0.0)).color(p.subtle))
-                .child(eyebrow(p, tr("shortcuts.title"), 10.0)),
+                .child(icon(&rune_kit::glyphs::KEYBOARD, 14.0).color(p.subtle))
+                .child(eyebrow(p, tr("shortcuts.title"), 13.0).color(p.text)),
             shortcuts,
         ))
         .scroll(ScrollSpec {
@@ -1405,12 +1454,15 @@ fn right<F: Fn(&str) -> &'static str>(
 }
 
 fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
+    // The console is force-dark in both themes, so all of its text must use a
+    // dark-theme Kit regardless of the surrounding palette.
+    let console_kit = kit(&Palette::new("ultraviolet", true));
     let mut lines = col().key("logs").gap(1.0);
     if s.logs.is_empty() {
         lines = lines.child(
             text(tr("logPanel.waitingForSequence").to_uppercase())
                 .font(micro(10.0, 700.0, 1.6))
-                .color(p.subtle),
+                .color(hex("a1a1aa")),
         );
     }
     for (i, line) in s.logs.iter().enumerate() {
@@ -1426,9 +1478,14 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                         chrono::Local::now().format("%H:%M:%S").to_string()
                     })
                     .font(mono(11.0))
-                    .color(p.subtle),
+                    .color(hex("a1a1aa")),
                 )
-                .child(text(line.clone()).font(mono(11.0)).color(p.text).wrap()),
+                .child(
+                    text(line.clone())
+                        .font(mono(11.0))
+                        .color(hex("d4d4d8"))
+                        .wrap(),
+                ),
         );
     }
     col()
@@ -1453,7 +1510,7 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                 .child(
                     text(tr("logPanel.systemConsole").to_uppercase())
                         .font(micro(9.0, 900.0, 1.8))
-                        .color(p.muted)
+                        .color(hex("a1a1aa"))
                         .grow(1.0),
                 )
                 .child(text_button(
@@ -1466,7 +1523,7 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                 .child(text_button(
                     p,
                     tr("logPanel.clear"),
-                    p.subtle,
+                    hex("a1a1aa"),
                     9.0,
                     |s: &mut Ui| s.logs.clear(),
                 )),
@@ -1495,75 +1552,69 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                             s.run_command(cmd);
                             s.command.replace_text("");
                         })
-                        .build(&kit(p)),
+                        .build(&console_kit),
                 ),
         )
 }
 
 fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
+    let link = |label: &str, tint: Color| {
+        text(label.to_uppercase())
+            .font(micro(11.0, 500.0, 0.0))
+            .color(tint)
+    };
+    let version = tv(
+        "zh-CN",
+        "footer.appVersion",
+        &[("version", env!("CARGO_PKG_VERSION"))],
+    )
+    .to_uppercase();
+    let meta = format!(
+        "{}: SCRCPY  {}: RUNE  {}: RUST",
+        tr("footer.core").to_uppercase(),
+        tr("footer.client").to_uppercase(),
+        tr("footer.ui").to_uppercase()
+    );
     col()
         .key("footer")
         .w_full()
-        .py(8.0)
+        .h(72.0)
         .px(24.0)
-        .gap(6.0)
+        .py(12.0)
+        .gap(12.0)
         .fill(p.glass)
         .border(1.0, p.border)
         .child(
-            text(tr("footer.aboutScrcpyGui").to_uppercase())
-                .font(micro(12.0, 900.0, 1.2))
-                .color(p.muted)
-                .center(),
-        )
-        .child(
             row()
-                .gap(32.0)
-                .center()
+                .gap(24.0)
+                .center_y()
                 .child(
-                    text(tr("footer.github").to_uppercase())
-                        .font(micro(9.0, 700.0, 0.8))
-                        .color(p.subtle),
+                    text(tr("footer.aboutScrcpyGui").to_uppercase())
+                        .font(micro(13.0, 600.0, 0.0))
+                        .color(p.muted),
                 )
                 .child(
-                    text(tr("footer.youtube").to_uppercase())
-                        .font(micro(9.0, 700.0, 0.8))
-                        .color(p.subtle),
-                )
-                .child(
-                    text(tr("footer.website").to_uppercase())
-                        .font(micro(9.0, 700.0, 0.8))
-                        .color(p.subtle),
-                )
-                .child(
-                    text(tr("footer.support").to_uppercase())
-                        .font(micro(9.0, 700.0, 0.8))
-                        .color(p.primary),
+                    row()
+                        .grow(1.0)
+                        .gap(28.0)
+                        .center()
+                        .child(link(tr("footer.github"), p.subtle))
+                        .child(link(tr("footer.youtube"), p.subtle))
+                        .child(link(tr("footer.website"), p.subtle))
+                        .child(link(tr("footer.support"), hex("6d28d9"))),
                 ),
         )
         .child(
-            row().gap(20.0).center().child(
-                text(format!(
-                    "{}: SCRCPY  {}: RUNE  {}: RUST",
-                    tr("footer.core").to_uppercase(),
-                    tr("footer.client").to_uppercase(),
-                    tr("footer.ui").to_uppercase()
-                ))
-                .font(micro(9.0, 900.0, 0.6))
-                .color(p.subtle),
-            ),
-        )
-        .child(
-            text(
-                tv(
-                    "zh-CN",
-                    "footer.appVersion",
-                    &[("version", env!("CARGO_PKG_VERSION"))],
-                )
-                .to_uppercase(),
-            )
-            .font(micro(10.0, 400.0, 0.0))
-            .color(p.subtle)
-            .center(),
+            row()
+                .gap(24.0)
+                .center_y()
+                .child(text(version).font(micro(11.0, 400.0, 0.0)).color(p.subtle))
+                .child(
+                    row()
+                        .grow(1.0)
+                        .center()
+                        .child(text(meta).font(micro(11.0, 400.0, 0.0)).color(p.subtle)),
+                ),
         )
 }
 
@@ -1978,11 +2029,11 @@ fn toggle_row(
                 } else {
                     p.input.alpha(0.5)
                 })
-                .child(text("◆").font(micro(12.0, 400.0, 0.0)).color(if on {
-                    tint
-                } else {
-                    p.subtle
-                })),
+                .child(
+                    el().size(8.0, 8.0)
+                        .radius(4.0)
+                        .fill(if on { tint } else { p.subtle }),
+                ),
         )
         .child(
             text(label.to_uppercase())
@@ -2072,28 +2123,45 @@ fn slider_row(
         )
 }
 
-fn input(p: &Palette, k: &Kit, edit: &rune::TextEdit, placeholder: &str, label: &str) -> El {
-    let field = label.to_string();
-    row()
-        .h(30.0)
+fn input(
+    p: &Palette,
+    k: &Kit,
+    edit: &rune::TextEdit,
+    placeholder: &str,
+    key: &str,
+    display: &str,
+) -> El {
+    let field = key.to_string();
+    col()
+        .gap(4.0)
         .grow(1.0)
         .min_w(0.0)
-        .padding(8.0)
-        .radius(8.0)
-        .fill(p.elevated.alpha(0.4))
-        .border(1.0, p.border)
+        .child(text(display).font(micro(11.0, 500.0, 0.0)).color(p.muted))
         .child(
-            TextInput::new(edit)
-                .plain()
-                .label(label)
-                .placeholder(placeholder)
-                .width(None)
-                .on_edit(move |s: &mut Ui| match field.as_str() {
-                    "IP" => &mut s.ip,
-                    "Pair IP" => &mut s.pair_ip,
-                    _ => &mut s.pair_code,
-                })
-                .build(k),
+            row()
+                .h(36.0)
+                .grow(1.0)
+                .min_w(0.0)
+                .padding(12.0)
+                .center_y()
+                .radius(8.0)
+                .fill(p.elevated.alpha(0.4))
+                .border(1.0, p.border)
+                .child(
+                    TextInput::new(edit)
+                        .plain()
+                        .label(display)
+                        .text_style(TextStyle::new(13.0, 400.0).lh(20.0))
+                        .height(20.0)
+                        .placeholder(placeholder)
+                        .width(None)
+                        .on_edit(move |s: &mut Ui| match field.as_str() {
+                            "IP" => &mut s.ip,
+                            "Pair IP" => &mut s.pair_ip,
+                            _ => &mut s.pair_code,
+                        })
+                        .build(k),
+                ),
         )
 }
 

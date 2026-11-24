@@ -13,6 +13,7 @@
 
 mod backend;
 mod i18n;
+mod icons;
 mod platform;
 mod theme;
 mod ui;
