@@ -40,11 +40,11 @@ the `windows` crate independently of Rune's patched dependency set.
   `rune-kit` components.
 - `rune-app/src/platform/`: global shortcut handlers and the Windows-only
   borderless-window drag hook (previously `grab.rs` + Tauri shortcuts plugin).
-- `rune-app/src/i18n.rs`: compact zh-CN/en catalogs. Other locales fall back to
-  English; the eight full TS catalogs were not ported.
+- `rune-app/src/i18n.rs` + `catalogs/`: all eight locales exported verbatim from
+  the old TS bundles, with English fallback and `{var}` interpolation.
 
 Settings live in `rune::prefs::Prefs` (`com.kb.scrcpy-gui`), not localStorage.
-Settings keys: `config`, `dark`, `locale`.
+Settings keys: `config`, `dark`, `theme`, `locale`, `history`.
 
 ## Event contract
 
@@ -62,10 +62,20 @@ Backend events keep their old names so the ported logic stays recognisable:
   in the working directory → `PATH`. `adb` and `scrcpy-server` sit beside `scrcpy`.
 - `download_scrcpy` still verifies `SHA256SUMS.txt` before extracting. Keep it.
 
-## Known gaps versus the old app
+## Ported behaviour
 
-- Only zh-CN and en are translated; the other six locales need catalogs.
-- Device friendly-name lookup, wireless history reconnect, update-check modal,
-  report export and the precise 2 s mDNS settle loop are not ported yet.
-- Default `rune-kit` theme replaces the five custom CSS themes; accent swatches
-  currently change the accent only.
+- Friendly device names (`adb shell getprop`, emulator AVD rule, display priority).
+- Wireless history: 10 newest-first `ip:port` entries, 25 s reconnect loop.
+- Update check (once per path), ThemedModal-style update dialog, report export.
+- 9-pass / 2 s device+mDNS settle polling with a shared busy guard.
+- Full 8-locale catalogs, five theme palettes, dark/light tokens, noise + glow,
+  window-wide file drag-and-drop, terminal timestamps and the 220 px console.
+
+## Remaining differences
+
+- The pairing modal's 2 s polling while waiting for an mDNS pairing broadcast
+  is not reproduced; the inline pair form works but has no waiting dialog.
+- The crash `ErrorBoundary` screen is gone (Rust panics are not caught in-view).
+- Noise is a generated pixel layer rather than the original tiled SVG; light
+  mode does not reproduce the old `.glass` CSS cascade asymmetry exactly.
+- A real device/scrcpy session has not been exercised end-to-end here.

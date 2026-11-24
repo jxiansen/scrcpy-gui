@@ -1,163 +1,76 @@
-//! Minimal runtime translation layer for the native port.
-//!
-//! The web app kept eight typed TS catalogs. This port ships the two most used
-//! catalogs (zh-CN and en) as a `match`; every other locale falls back to
-//! English. Add a branch here when a locale needs a full catalog.
+//! Runtime catalogs. All eight locales were exported verbatim from the old
+//! TS bundles (`src/i18n/locales/*.ts` at commit c4e8721).
 
-macro_rules! catalog {
-    ($locale:expr, $key:expr, $zh:expr, $en:expr) => {
-        if $locale.starts_with("zh") && !$locale.starts_with("zh-TW") {
-            let _ = $key;
-            $zh
-        } else {
-            let _ = $key;
-            $en
-        }
-    };
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+type Dict = HashMap<&'static str, &'static str>;
+
+const CATALOG_SOURCES: &[(&str, &str)] = &[
+    ("en", include_str!("i18n/catalogs/en.json")),
+    ("fr", include_str!("i18n/catalogs/fr.json")),
+    ("pt-BR", include_str!("i18n/catalogs/pt_BR.json")),
+    ("zh-CN", include_str!("i18n/catalogs/zh_CN.json")),
+    ("zh-TW", include_str!("i18n/catalogs/zh_TW.json")),
+    ("ru", include_str!("i18n/catalogs/ru.json")),
+    ("id", include_str!("i18n/catalogs/id.json")),
+    ("ar", include_str!("i18n/catalogs/ar.json")),
+];
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
 }
 
+fn catalogs() -> &'static HashMap<&'static str, Dict> {
+    static CATS: OnceLock<HashMap<&'static str, Dict>> = OnceLock::new();
+    CATS.get_or_init(|| {
+        let en_src = CATALOG_SOURCES[0].1;
+        let en_json: serde_json::Value = serde_json::from_str(en_src).expect("en catalog");
+        let en: Dict = en_json
+            .as_object()
+            .expect("en object")
+            .iter()
+            .map(|(k, v)| (leak(k.clone()), leak(v.as_str().unwrap_or("").to_string())))
+            .collect();
+
+        let mut all = HashMap::new();
+        all.insert("en", en.clone());
+        for (locale, src) in CATALOG_SOURCES.iter().skip(1) {
+            let value: serde_json::Value = serde_json::from_str(src).unwrap_or_default();
+            let mut dict = en.clone();
+            if let Some(obj) = value.as_object() {
+                for (k, v) in obj {
+                    dict.insert(leak(k.clone()), leak(v.as_str().unwrap_or("").to_string()));
+                }
+            }
+            all.insert(*locale, dict);
+        }
+        all
+    })
+}
+
+/// Lookup with English fallback. Returns a leaked static string so callers can
+/// keep using `&'static str` in Rune element builders.
 pub fn t(locale: &str, key: &str) -> &'static str {
-    match key {
-        "app.title" => "Scrcpy GUI",
-        "common.close" => catalog!(locale, key, "关闭", "Close"),
-        "header.ready" => catalog!(locale, key, "Scrcpy 就绪", "Scrcpy Ready"),
-        "header.checking" => catalog!(locale, key, "检测中…", "Checking…"),
-        "header.notFound" => catalog!(locale, key, "未找到 Scrcpy", "Scrcpy not found"),
-        "header.downloading" => catalog!(locale, key, "同步组件", "Syncing Components"),
-        "header.install" => catalog!(locale, key, "安装核心", "Install Core"),
-        "header.selectFolder" => catalog!(locale, key, "选择目录", "Folder"),
-        "header.language" => catalog!(locale, key, "语言", "Language"),
-        "header.theme" => catalog!(locale, key, "主题", "Theme"),
-        "header.dark" => catalog!(locale, key, "深色", "Dark"),
-        "header.light" => catalog!(locale, key, "浅色", "Light"),
-        "sidebar.hub" => catalog!(locale, key, "设备中心", "Device Hub"),
-        "sidebar.refresh" => catalog!(locale, key, "刷新", "Refresh"),
-        "sidebar.syncing" => catalog!(locale, key, "同步中…", "Syncing…"),
-        "sidebar.killAdb" => catalog!(locale, key, "终止 ADB", "Kill ADB"),
-        "sidebar.noDevices" => catalog!(locale, key, "未检测到设备", "No devices detected"),
-        "sidebar.live" => catalog!(locale, key, "在线", "Live"),
-        "sidebar.ready" => catalog!(locale, key, "就绪", "Ready"),
-        "sidebar.usb" => catalog!(locale, key, "USB", "USB"),
-        "sidebar.wifi" => catalog!(locale, key, "Wi-Fi", "Wi-Fi"),
-        "sidebar.connect" => catalog!(locale, key, "连接", "Connect"),
-        "sidebar.connecting" => catalog!(locale, key, "连接中…", "Connecting…"),
-        "sidebar.ipPlaceholder" => catalog!(locale, key, "192.168.x.x:5555", "192.168.x.x:5555"),
-        "sidebar.discovered" => catalog!(
-            locale,
-            key,
-            "发现的设备 (mDNS)",
-            "Discovered Devices (mDNS)"
-        ),
-        "sidebar.recent" => catalog!(locale, key, "最近设备", "Recent Devices"),
-        "sidebar.clear" => catalog!(locale, key, "清除", "Clear"),
-        "sidebar.pair" => catalog!(
-            locale,
-            key,
-            "配对设备 (Android 11+)",
-            "Pair Device (Android 11+)"
-        ),
-        "sidebar.pairCode" => catalog!(locale, key, "配对码", "Pairing code"),
-        "sidebar.startPairing" => catalog!(locale, key, "开始配对", "Start Pairing"),
-        "sidebar.push" => catalog!(locale, key, "闪传 / 推送文件", "Flash / Push Files"),
-        "sidebar.pushSub" => catalog!(
-            locale,
-            key,
-            "点击选择 APK 或任意文件",
-            "Click to pick an APK or any file"
-        ),
-        "control.capture" => catalog!(locale, key, "捕获源", "Capture Source"),
-        "control.screen" => catalog!(locale, key, "屏幕", "Screen"),
-        "control.camera" => catalog!(locale, key, "摄像头", "Camera"),
-        "control.desktop" => catalog!(locale, key, "桌面", "Desktop"),
-        "control.engine" => catalog!(locale, key, "引擎配置", "Engine Configuration"),
-        "control.active" => catalog!(locale, key, "运行中", "Active"),
-        "control.ready" => catalog!(locale, key, "就绪", "Ready"),
-        "control.bitrate" => catalog!(locale, key, "码率", "Bitrate"),
-        "control.resolution" => catalog!(locale, key, "分辨率", "Resolution"),
-        "control.original" => catalog!(locale, key, "原始", "Original"),
-        "control.fps" => catalog!(locale, key, "帧率", "FPS"),
-        "control.rotation" => catalog!(locale, key, "旋转", "Rotation"),
-        "control.renderer" => catalog!(locale, key, "图形渲染器", "Graphics Renderer"),
-        "control.hwdec" => catalog!(locale, key, "硬件解码", "Hardware Decoding"),
-        "control.codec" => catalog!(locale, key, "编码", "Codec"),
-        "control.vsync" => catalog!(locale, key, "垂直同步", "VSync"),
-        "control.ignoreConstraints" => {
-            catalog!(locale, key, "忽略编码器限制", "Ignore Encoder Constraints")
-        }
-        "control.start" => catalog!(locale, key, "启动任务", "Start Mission"),
-        "control.startCamera" => catalog!(locale, key, "启用摄像头", "Engage Camera"),
-        "control.startDesktop" => catalog!(locale, key, "进入桌面", "Eject to Desktop"),
-        "control.stop" => catalog!(locale, key, "停止会话", "Stop Session"),
-        "control.inputEnhancements" => catalog!(locale, key, "输入增强", "Input Enhancements"),
-        "control.hidKeyboard" => catalog!(locale, key, "HID 键盘", "HID Keyboard"),
-        "control.hidMouse" => catalog!(locale, key, "HID 鼠标", "HID Mouse"),
-        "control.pureHid" => catalog!(locale, key, "纯 HID (无镜像)", "Pure HID (No Mirror)"),
-        "control.lens" => catalog!(locale, key, "摄像头设备", "Camera Device"),
-        "control.refreshLenses" => catalog!(locale, key, "刷新镜头", "Refresh Lenses"),
-        "control.autoSelect" => catalog!(locale, key, "自动选择", "Auto Select"),
-        "control.aspect" => catalog!(locale, key, "宽高比", "Aspect"),
-        "control.torch" => catalog!(locale, key, "手电筒", "Camera Torch"),
-        "control.zoom" => catalog!(locale, key, "变焦", "Camera Zoom"),
-        "control.virtualDisplay" => catalog!(locale, key, "虚拟显示引擎", "Virtual Display Engine"),
-        "control.width" => catalog!(locale, key, "宽度", "Width"),
-        "control.height" => catalog!(locale, key, "高度", "Height"),
-        "control.dpi" => catalog!(locale, key, "DPI", "DPI"),
-        "control.flex" => catalog!(locale, key, "弹性显示", "Flex Display"),
-        "control.ratioLock" => catalog!(locale, key, "比例锁定", "Ratio Lock"),
-        "control.bgColor" => catalog!(locale, key, "背景颜色", "Background Color"),
-        "control.default" => catalog!(locale, key, "默认", "Default"),
-        "control.auto" => catalog!(locale, key, "自动", "Auto"),
-        "control.disabled" => catalog!(locale, key, "禁用", "Disabled"),
-        "session.title" => catalog!(locale, key, "会话行为", "Session Behavior"),
-        "session.awake" => catalog!(locale, key, "保持唤醒", "Stay Awake"),
-        "session.keepActive" => catalog!(locale, key, "保持活跃", "Keep Active"),
-        "session.screenOff" => catalog!(locale, key, "关闭屏幕", "Screen Off"),
-        "session.audio" => catalog!(locale, key, "转发音频", "Forward Audio"),
-        "session.audioCodec" => catalog!(locale, key, "音频编码", "Audio Codec"),
-        "session.alwaysOnTop" => catalog!(locale, key, "始终置顶", "Always On Top"),
-        "session.fullscreen" => catalog!(locale, key, "全屏", "Full Screen"),
-        "session.borderless" => catalog!(locale, key, "无边框", "Borderless"),
-        "session.remember" => catalog!(locale, key, "记住窗口位置", "Remember Window Position"),
-        "session.record" => catalog!(locale, key, "录制画面", "Record Feed"),
-        "session.recordPath" => catalog!(locale, key, "录制路径", "Record Path"),
-        "session.change" => catalog!(locale, key, "更改", "Change"),
-        "session.defaultVideos" => {
-            catalog!(locale, key, "默认 (视频文件夹)", "Default (Videos Folder)")
-        }
-        "log.console" => catalog!(locale, key, "系统控制台", "System Console"),
-        "log.report" => catalog!(locale, key, "报告", "Report"),
-        "log.clear" => catalog!(locale, key, "清空", "Clear"),
-        "log.empty" => catalog!(locale, key, "等待指令…", "Waiting for sequence…"),
-        "shortcuts.title" => catalog!(locale, key, "快捷键", "Shortcuts"),
-        "footer.about" => catalog!(locale, key, "关于 Scrcpy GUI", "About Scrcpy GUI"),
-        "footer.core" => catalog!(locale, key, "核心", "Core"),
-        "footer.client" => catalog!(locale, key, "客户端", "Client"),
-        "footer.ui" => catalog!(locale, key, "界面", "UI"),
-        "footer.assets" => catalog!(locale, key, "资源", "Assets"),
-        "onboarding.title" => catalog!(locale, key, "初始化核心组件", "Setup Core Components"),
-        "onboarding.download" => {
-            catalog!(locale, key, "下载核心二进制文件", "Download Core Binaries")
-        }
-        "onboarding.success" => catalog!(
-            locale,
-            key,
-            "成功！二进制文件已就绪",
-            "Success! Binaries Active"
-        ),
-        "onboarding.continue" => catalog!(locale, key, "进入应用", "Continue to App"),
-        "onboarding.manual" => catalog!(
-            locale,
-            key,
-            "手动安装：将 scrcpy 与 adb 放入 scrcpy-bin/ 目录",
-            "Manual setup: place scrcpy and adb in scrcpy-bin/"
-        ),
-        "alert.noDevice" => catalog!(
-            locale,
-            key,
-            "请先选择一个设备",
-            "Please select a device first"
-        ),
-        "alert.update" => catalog!(locale, key, "发现新版本", "Update available"),
-        _ => "?",
+    let cats = catalogs();
+    let en = cats.get("en").expect("en catalog");
+    let dict = cats.get(locale).unwrap_or(en);
+    dict.get(key)
+        .filter(|v| !v.is_empty())
+        .or_else(|| en.get(key))
+        .copied()
+        .unwrap_or_else(|| leak(key.to_string()))
+}
+
+/// Interpolating variant: replaces `{name}` placeholders from `vars`.
+pub fn tv(locale: &str, key: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = t(locale, key).to_string();
+    for (name, value) in vars {
+        out = out.replace(&format!("{{{name}}}"), value);
     }
+    out
+}
+
+pub fn language_name(locale: &str, code: &str) -> &'static str {
+    t(locale, &format!("languages.{code}"))
 }

@@ -14,6 +14,7 @@
 mod backend;
 mod i18n;
 mod platform;
+mod theme;
 mod ui;
 
 use rune::{AppSpec, Tx, Waker};

@@ -1,10 +1,11 @@
-//! The native UI: a close port of the React layout to Rune elements.
+//! Pixel-oriented port of the old React/Tailwind interface to Rune.
+//! Geometry, colours and type scale follow the CSS at commit c4e8721.
 
-use rune::tok::{self, type_};
-use rune::{Cx, El, ScrollSpec, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, Kit, Select, Switch, TextInput};
+use rune::{Color, Cx, El, ScrollSpec, TextStyle, col, el, row, text};
+use rune_kit::{Kit, PaletteSeed, Select, SelectAppearance, TextInput};
 
-use crate::i18n::t;
+use crate::i18n::{language_name, t, tv};
+use crate::theme::{Palette, THEMES, hex};
 use crate::ui::state::{SessionKind, Ui};
 
 const FPS: &[&str] = &["Auto", "30", "60", "90", "120"];
@@ -17,452 +18,785 @@ const ASPECT: &[&str] = &["0", "16:9", "4:3"];
 const AUDIO_CODEC: &[&str] = &["auto", "opus", "aac", "flac", "raw"];
 const LENSES: &[&str] = &["Auto Select", "Back", "Front", "External"];
 const PRESETS: &[&str] = &["Custom", "1080p", "1440p", "4K", "21:9"];
-const LOCALES: &[&str] = &["en", "zh-CN", "zh-TW", "fr", "pt-BR", "ru", "id", "ar"];
+const LOCALES: &[&str] = &["en", "fr", "pt-BR", "zh-CN", "zh-TW", "ru", "id", "ar"];
+
+type ToggleRow = (&'static str, bool, fn(&mut Ui));
+
+fn micro(size: f32, weight: f32, tracking: f32) -> TextStyle {
+    TextStyle::new(size, weight)
+        .tracking(tracking)
+        .lh(size + 4.0)
+}
+
+fn mono(size: f32) -> TextStyle {
+    micro(size, 400.0, 0.0).mono()
+}
+
+fn eyebrow(p: &Palette, value: &str, size: f32) -> El {
+    text(value.to_uppercase())
+        .font(micro(size, 900.0, size * 0.1))
+        .color(p.muted)
+}
+
+fn kit(p: &Palette) -> Kit {
+    Kit::from_palette(PaletteSeed {
+        bg: p.elevated,
+        fg: p.text,
+        accent: p.primary,
+    })
+}
 
 pub fn view(s: &Ui, _cx: &mut Cx<Ui>) -> El {
-    let k = Kit::neutral(s.dark);
+    let p = Palette::new(&s.theme, s.dark);
+    let k = kit(&p);
     let mut layer: Vec<El> = Vec::new();
     let tr = |key: &str| t(&s.locale, key);
 
-    let body = col()
+    let root = col()
         .key("window")
         .w_full()
         .h_full()
-        .fill(k.c.page)
-        .child(header(s, &k, &tr))
+        .fill(p.bg)
+        .on_drop_files(|s: &mut Ui, paths: &[std::path::PathBuf], _| {
+            if s.config.device.is_empty() {
+                s.log(t(&s.locale, "logs.noDeviceForDragDrop").to_string());
+                return;
+            }
+            for path in paths {
+                s.handle_file(path.clone());
+            }
+        })
+        .child(
+            el().key("glow")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .radial_gradient(
+                    [0.5, 0.5],
+                    720.0,
+                    [
+                        (0.0, p.primary.alpha(0.18)),
+                        (0.55, p.primary.alpha(0.05)),
+                        (1.0, p.primary.alpha(0.0)),
+                    ],
+                )
+                .a11y_hidden(),
+        )
+        .child(
+            el().key("noise")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .pixels(&s.noise)
+                .opacity(0.2)
+                .a11y_hidden(),
+        )
+        .child(header(s, &p, &k, &tr))
         .child(
             row()
                 .key("workspace")
                 .grow(1.0)
                 .min_h(0.0)
-                .gap(10.0)
-                .px(12.0)
-                .py(10.0)
-                .child(sidebar(s, &k, &tr))
-                .child(center(s, &k, &mut layer, &tr))
-                .child(right(s, &k, &mut layer, &tr)),
+                .px(24.0)
+                .pt(16.0)
+                .pb(8.0)
+                .gap(24.0)
+                .child(sidebar(s, &p, &k, &tr))
+                .child(center(s, &p, &k, &mut layer, &tr))
+                .child(right(s, &p, &k, &mut layer, &tr)),
         )
-        .child(footer(&k, &tr));
+        .child(footer(&p, &tr));
 
     if s.onboarding_open && s.scrcpy_ok != Some(true) {
-        layer.push(onboarding(s, &k, &tr));
+        layer.push(onboarding(s, &p, &tr));
+    }
+    if let Some(info) = &s.update {
+        layer.push(update_modal(s, &p, info, &tr));
     }
     if let Some(message) = &s.alert {
-        layer.push(alert(&k, message));
+        layer.push(alert_modal(s, &p, message));
     }
-    rune_kit::root(body, layer)
+    rune_kit::root(root, layer)
 }
 
-fn header<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, tr: &F) -> El {
-    let dot = match s.scrcpy_ok {
-        Some(true) => tok::accent(3, s.dark),
-        Some(false) => k.c.danger.fg,
-        None => k.c.warning.fg,
-    };
-    let status = if s.download.active {
-        format!("{} {}%", tr("header.downloading"), s.download.percent)
-    } else {
-        match s.scrcpy_ok {
-            Some(true) => tr("header.ready").to_string(),
-            Some(false) => {
-                if s.scrcpy_message.is_empty() {
-                    tr("header.notFound").to_string()
-                } else {
-                    s.scrcpy_message.clone()
-                }
-            }
-            None => tr("header.checking").to_string(),
-        }
-    };
-
-    let mut themes = row().key("themes").gap(6.0).center_y();
-    for i in 0..5 {
-        themes = themes.child(
-            el().key(format!("theme-{i}"))
-                .size(15.0, 15.0)
+fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> El {
+    let mut swatches = row().key("swatches").gap(8.0).center_y();
+    for id in THEMES.iter() {
+        let theme = *id;
+        let preview = Palette::new(theme, s.dark);
+        swatches = swatches.child(
+            el().key(format!("swatch-{theme}"))
+                .size(16.0, 16.0)
                 .radius(8.0)
-                .fill(tok::accent(i, s.dark))
-                .border(if i == s.accent { 2.0 } else { 0.0 }, k.c.text_base)
-                .on_press(move |s: &mut Ui| s.accent = i),
+                .fill(preview.primary)
+                .border(3.0, p.bg)
+                .on_press(move |s: &mut Ui| s.set_theme(theme)),
         );
     }
 
-    let locale = Select::new("locale", LOCALES)
-        .width(90.0)
-        .current(Some(&s.locale))
-        .label(tr("header.language"))
+    let mut modes = row()
+        .key("modes")
+        .gap(2.0)
+        .padding(2.0)
+        .radius(6.0)
+        .fill(p.glass)
+        .border(1.0, p.border);
+    let mode_labels = [
+        tr("header.colorModes.light"),
+        tr("header.colorModes.dark"),
+        tr("header.colorModes.system"),
+    ];
+    for (i, label) in mode_labels.iter().enumerate() {
+        let active = (i == 0 && !s.dark) || (i == 1 && s.dark);
+        modes = modes.child(
+            el().key(format!("mode-{i}"))
+                .h(18.0)
+                .px(5.0)
+                .center()
+                .radius(4.0)
+                .fill(if active {
+                    p.primary
+                } else {
+                    Color::TRANSPARENT
+                })
+                .on_press(move |s: &mut Ui| {
+                    if i < 2 {
+                        s.set_dark(i == 1);
+                    }
+                })
+                .child(
+                    text(label.to_uppercase())
+                        .font(micro(8.0, 900.0, 0.5))
+                        .color(if active { p.on_primary } else { p.muted }),
+                ),
+        );
+    }
+
+    let lang_options: Vec<String> = LOCALES
+        .iter()
+        .map(|code| language_name(&s.locale, code).to_string())
+        .collect();
+    let lang = Select::new("locale", &lang_options)
+        .width(110.0)
+        .current(Some(language_name(&s.locale, &s.locale)))
+        .label(tr("header.languageLabel"))
+        .appearance(SelectAppearance::Inline)
         .open(s.open_select.as_deref() == Some("locale"))
         .on_toggle(|s: &mut Ui| toggle_select(s, "locale"))
         .on_close(|s: &mut Ui| s.open_select = None)
-        .on_choose(|s: &mut Ui, v: &str, _| s.set_locale(v))
+        .on_choose(|s: &mut Ui, _label: &str, _| {
+            let idx = LOCALES
+                .iter()
+                .position(|code| language_name(&s.locale, code) == _label)
+                .unwrap_or(0);
+            s.set_locale(LOCALES[idx]);
+        })
         .build(k, &mut Vec::new());
 
-    let engine = row()
-        .key("engine")
-        .gap(8.0)
-        .center_y()
-        .child(el().key("engine-dot").size(8.0, 8.0).radius(4.0).fill(dot))
-        .child(text(status).font(type_::LABEL).color(k.c.text_base))
-        .child(
-            Button::new(tr("header.selectFolder"))
-                .variant(ButtonVariant::Ghost)
-                .on_press_tx(|_s: &mut Ui, tx: &mut rune::Tx| {
-                    let opts = rune::FileDialogOptions {
-                        title: "scrcpy folder".into(),
-                        ..Default::default()
-                    };
-                    tx.open_folder(
-                        opts,
-                        |s: &mut Ui, result: rune::file_dialog::FileDialogResult, _| {
-                            if let Ok(Some(path)) = result {
-                                s.set_scrcpy_path(Some(path.to_string_lossy().to_string()));
-                            }
-                        },
-                    );
-                })
-                .build(k),
+    let dot = match s.scrcpy_ok {
+        Some(true) => p.success,
+        Some(false) => p.danger,
+        None => p.warning,
+    };
+    let status = if s.download.active {
+        tv(
+            &s.locale,
+            "header.syncingComponents",
+            &[("progress", &s.download.percent.to_string())],
         )
+    } else {
+        match s.scrcpy_ok {
+            Some(true) => tr("header.scrcpyReady").to_string(),
+            Some(false) => s.scrcpy_message.clone(),
+            None => tr("common.loading").to_string(),
+        }
+    };
+
+    let mut engine = row()
+        .key("engine")
+        .gap(16.0)
+        .padding(8.0)
+        .radius(12.0)
+        .fill(p.glass)
+        .border(1.0, p.glass_border)
         .child(
-            Button::new(tr("header.install"))
-                .variant(ButtonVariant::Contrast)
-                .disabled(s.scrcpy_ok == Some(true) || s.download.active)
-                .on_press(|s: &mut Ui| s.download_scrcpy())
-                .build(k),
+            col()
+                .key("engine-status")
+                .min_w(110.0)
+                .gap(4.0)
+                .child(
+                    row()
+                        .gap(6.0)
+                        .center_y()
+                        .child(eyebrow(p, tr("header.scrcpyEngine"), 9.0))
+                        .child(el().size(6.0, 6.0).radius(3.0).fill(dot)),
+                )
+                .child(
+                    text(status.to_uppercase())
+                        .font(micro(12.0, 900.0, -0.6))
+                        .color(if s.scrcpy_ok == Some(true) {
+                            p.success
+                        } else {
+                            p.warning
+                        }),
+                ),
         );
+
+    if s.download.active {
+        engine = engine.child(
+            el().key("download-track")
+                .w(70.0)
+                .h(4.0)
+                .radius(2.0)
+                .fill(p.border)
+                .child(
+                    el().w(70.0 * s.download.percent as f32 / 100.0)
+                        .h(4.0)
+                        .radius(2.0)
+                        .fill(p.success),
+                ),
+        );
+    }
+    engine = engine
+        .child(
+            el().key("engine-divider")
+                .w(1.0)
+                .h(28.0)
+                .fill(p.border)
+                .a11y_hidden(),
+        )
+        .child(folder_button(p, tr("header.selectFolder"), |s, path| {
+            s.set_scrcpy_path(Some(path.to_string_lossy().to_string()));
+        }))
+        .child(solid_button(
+            p,
+            tr("header.installCore"),
+            p.success,
+            p.bg,
+            9.0,
+            |s: &mut Ui| {
+                s.download_scrcpy();
+            },
+        ));
 
     row()
         .key("header")
-        .h(62.0)
-        .px(14.0)
-        .gap(12.0)
+        .h(84.0)
+        .px(8.0)
+        .py(16.0)
+        .gap(16.0)
         .center_y()
-        .fill(k.c.bg_base)
-        .border(1.0, k.c.border_muted)
         .child(
             row()
                 .key("header-left")
                 .grow(1.0)
-                .gap(8.0)
+                .gap(20.0)
                 .center_y()
                 .child(
-                    text(tr("header.theme"))
-                        .font(type_::LABEL)
-                        .color(k.c.text_muted),
+                    row()
+                        .gap(12.0)
+                        .center_y()
+                        .child(el().size(12.0, 12.0).radius(6.0).fill(p.primary))
+                        .child(eyebrow(p, tr("header.themeLabel"), 9.0)),
                 )
-                .child(themes)
-                .child(
-                    Button::new(if s.dark {
-                        tr("header.dark")
-                    } else {
-                        tr("header.light")
-                    })
-                    .variant(ButtonVariant::Ghost)
-                    .on_press(|s: &mut Ui| s.set_dark(!s.dark))
-                    .build(k),
-                )
-                .child(locale),
+                .child(swatches)
+                .child(modes)
+                .child(lang),
         )
         .child(
-            row()
-                .key("header-center")
-                .gap(8.0)
-                .center_y()
-                .child(text("scrcpy ").font(type_::TITLE).color(k.c.text_base))
+            col()
+                .key("branding")
+                .grow(1.0)
+                .center()
+                .gap(2.0)
                 .child(
-                    text("GUI")
-                        .font(type_::TITLE)
-                        .color(tok::accent(s.accent, s.dark)),
+                    row()
+                        .gap(8.0)
+                        .center()
+                        .child(
+                            text("SCRCPY")
+                                .font(TextStyle::new(30.0, 900.0).tracking(-1.5).italic())
+                                .color(p.text),
+                        )
+                        .child(
+                            text("GUI")
+                                .font(TextStyle::new(30.0, 900.0).tracking(-1.5))
+                                .color(p.primary),
+                        ),
+                )
+                .child(
+                    row()
+                        .gap(6.0)
+                        .center()
+                        .child(
+                            text(format!("V{}", env!("CARGO_PKG_VERSION")))
+                                .font(micro(10.0, 900.0, 0.6))
+                                .color(p.muted),
+                        )
+                        .child(el().size(6.0, 6.0).radius(3.0).fill(p.success)),
+                )
+                .child(
+                    text(tr("header.tagline").to_uppercase())
+                        .font(micro(9.0, 900.0, 2.7))
+                        .color(p.subtle),
                 ),
         )
         .child(
             row()
                 .key("header-right")
                 .grow(1.0)
-                .gap(8.0)
+                .gap(12.0)
                 .center()
                 .child(engine),
         )
 }
 
-fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, tr: &F) -> El {
-    let mut devices = col().key("devices").gap(4.0);
+fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> El {
+    let mut device_rows = col()
+        .key("devices")
+        .gap(6.0)
+        .max_h(220.0)
+        .min_h(40.0)
+        .shrink();
     if s.devices.is_empty() {
-        devices = devices.child(
-            text(tr("sidebar.noDevices"))
-                .font(type_::BODY)
-                .color(k.c.text_muted),
-        );
-    }
-    for d in &s.devices {
-        let serial = d.serial.clone();
-        let selected = s.config.device == d.serial;
-        let running = s.running.get(&d.serial).copied().unwrap_or(false);
-        let wifi = d.serial.contains('.');
-        devices = devices.child(
-            row()
-                .key(format!("device-{}", d.serial))
-                .h(38.0)
-                .px(8.0)
-                .gap(8.0)
-                .center_y()
-                .radius(tok::radius::SM)
-                .fill(if selected { k.c.layer_02 } else { k.c.layer_01 })
-                .on_press(move |s: &mut Ui| s.select_device(serial.clone()))
+        device_rows = device_rows.child(
+            col()
+                .h(64.0)
+                .center()
+                .radius(8.0)
+                .fill(p.elevated.alpha(0.2))
+                .border(1.0, p.border.alpha(0.5))
                 .child(
-                    el().key("tile")
-                        .size(8.0, 8.0)
-                        .radius(4.0)
-                        .fill(if running {
-                            tok::accent(3, s.dark)
-                        } else {
-                            k.c.text_faint
-                        }),
-                )
-                .child(
-                    col()
-                        .gap(1.0)
-                        .grow(1.0)
-                        .child(text(&d.model).font(type_::BODY).color(k.c.text_base))
-                        .child(
-                            text(&d.serial)
-                                .font(type_::MONO_CAPTION)
-                                .color(k.c.text_muted),
-                        ),
-                )
-                .child(
-                    text(if running {
-                        tr("sidebar.live")
-                    } else {
-                        tr("sidebar.ready")
-                    })
-                    .font(type_::LABEL)
-                    .color(k.c.text_muted),
-                )
-                .child(
-                    text(if wifi {
-                        tr("sidebar.wifi")
-                    } else {
-                        tr("sidebar.usb")
-                    })
-                    .font(type_::LABEL)
-                    .color(k.c.text_muted),
+                    text(tr("sidebar.noDevicesDetected"))
+                        .font(micro(10.0, 400.0, 0.0).italic())
+                        .color(p.subtle),
                 ),
         );
+    }
+    for device in &s.devices {
+        let serial = device.serial.clone();
+        let selected = s.config.device == device.serial;
+        let running = s.running.get(&device.serial).copied().unwrap_or(false);
+        let wifi = device.serial.contains('.');
+        device_rows =
+            device_rows.child(
+                row()
+                    .key(format!("device-{}", device.serial))
+                    .gap(10.0)
+                    .padding(10.0)
+                    .radius(8.0)
+                    .fill(if selected {
+                        p.primary.alpha(0.05)
+                    } else {
+                        p.elevated.alpha(0.2)
+                    })
+                    .border(
+                        1.0,
+                        if selected {
+                            p.primary.alpha(0.3)
+                        } else {
+                            p.border.alpha(0.5)
+                        },
+                    )
+                    .on_press(move |s: &mut Ui| s.select_device(serial.clone()))
+                    .child(
+                        row()
+                            .size(26.0, 26.0)
+                            .radius(6.0)
+                            .center()
+                            .fill(if selected { p.primary } else { p.input })
+                            .child(text("▣").font(micro(14.0, 400.0, 0.0)).color(if selected {
+                                p.on_primary
+                            } else {
+                                p.subtle
+                            })),
+                    )
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .gap(2.0)
+                            .child(
+                                text(device.label())
+                                    .font(micro(11.0, 700.0, -0.3))
+                                    .truncate()
+                                    .color(if selected { p.text } else { p.muted }),
+                            )
+                            .child(
+                                row()
+                                    .gap(8.0)
+                                    .center_y()
+                                    .child(el().size(4.0, 4.0).radius(2.0).fill(if running {
+                                        p.success
+                                    } else {
+                                        p.subtle
+                                    }))
+                                    .child(
+                                        text(
+                                            if running {
+                                                tr("sidebar.live")
+                                            } else {
+                                                tr("sidebar.ready")
+                                            }
+                                            .to_uppercase(),
+                                        )
+                                        .font(micro(8.0, 900.0, 0.8))
+                                        .color(if running { p.success } else { p.subtle }),
+                                    )
+                                    .child(
+                                        text(
+                                            if wifi {
+                                                tr("sidebar.wifi")
+                                            } else {
+                                                tr("sidebar.usb")
+                                            }
+                                            .to_uppercase(),
+                                        )
+                                        .font(micro(7.0, 900.0, 0.3))
+                                        .color(if wifi {
+                                            p.primary
+                                        } else {
+                                            p.muted
+                                        }),
+                                    ),
+                            ),
+                    ),
+            );
     }
 
     let tabs = row()
         .key("transport")
         .gap(4.0)
-        .child(
-            Button::new(tr("sidebar.usb"))
-                .variant(ButtonVariant::Ghost)
-                .build(k),
-        )
-        .child(
-            Button::new(tr("sidebar.wifi"))
-                .variant(ButtonVariant::Ghost)
-                .build(k),
-        );
+        .padding(4.0)
+        .radius(8.0)
+        .fill(p.elevated.alpha(0.4))
+        .border(1.0, p.border.alpha(0.5))
+        .child(segment(p, tr("sidebar.usb"), false, |_| {}))
+        .child(segment(p, tr("sidebar.wifi"), true, |_| {}));
 
-    let ip = TextInput::new(&s.ip)
-        .label("IP")
-        .placeholder(tr("sidebar.ipPlaceholder"))
-        .width(Some(176.0))
-        .on_edit(|s: &mut Ui| &mut s.ip)
-        .build(k);
-    let pair_ip = TextInput::new(&s.pair_ip)
-        .label("Pair IP")
-        .placeholder(tr("sidebar.ipPlaceholder"))
-        .width(Some(112.0))
-        .on_edit(|s: &mut Ui| &mut s.pair_ip)
-        .build(k);
-    let pair_code = TextInput::new(&s.pair_code)
-        .label(tr("sidebar.pairCode"))
-        .placeholder("123456")
-        .width(Some(112.0))
-        .on_edit(|s: &mut Ui| &mut s.pair_code)
-        .build(k);
+    let ip_input = input(p, k, &s.ip, tr("sidebar.ipPlaceholder"), "IP");
+    let pair_ip = input(p, k, &s.pair_ip, tr("sidebar.ipPlaceholder"), "Pair IP");
+    let pair_code = input(
+        p,
+        k,
+        &s.pair_code,
+        tr("sidebar.pairingCodePlaceholder"),
+        "Pairing code",
+    );
 
-    let mut mdns = col().key("mdns").gap(2.0);
+    let mut wifi_rows = col().key("wifi").gap(12.0);
     for service in &s.mdns {
         if !service.service.contains("_adb-tls") {
             continue;
         }
-        let addr = service.address.clone();
-        mdns = mdns.child(
+        let address = service.address.clone();
+        wifi_rows = wifi_rows.child(
             row()
                 .key(format!("mdns-{}", service.name))
-                .h(30.0)
-                .px(8.0)
-                .center_y()
-                .radius(tok::radius::SM)
-                .fill(k.c.layer_01)
-                .on_press(move |s: &mut Ui| s.ip.replace_text(&addr))
+                .gap(8.0)
+                .padding(8.0)
+                .radius(8.0)
+                .fill(p.input.alpha(0.2))
+                .border(1.0, p.border.alpha(0.5))
+                .on_press(move |s: &mut Ui| s.ip.replace_text(address.clone()))
                 .child(
                     text(&service.name)
-                        .font(type_::BODY)
-                        .color(k.c.text_base)
+                        .font(micro(10.0, 700.0, 0.0))
+                        .color(p.muted)
+                        .grow(1.0)
+                        .truncate(),
+                )
+                .child(text(&service.address).font(mono(8.0)).color(p.primary)),
+        );
+    }
+
+    let mut recent = col().key("recent").gap(4.0);
+    if s.history.is_empty() {
+        recent = recent.child(text("-").font(mono(9.0)).color(p.subtle));
+    }
+    for ip in &s.history {
+        let target = ip.clone();
+        recent = recent.child(
+            row()
+                .key(format!("recent-{ip}"))
+                .gap(8.0)
+                .padding(8.0)
+                .radius(8.0)
+                .fill(p.input.alpha(0.2))
+                .border(1.0, p.border.alpha(0.5))
+                .on_press(move |s: &mut Ui| {
+                    let ip = target.clone();
+                    s.ip.replace_text(ip.clone());
+                    s.connect(ip);
+                })
+                .child(
+                    text(ip)
+                        .font(micro(10.0, 700.0, 0.0))
+                        .color(p.muted)
                         .grow(1.0)
                         .truncate(),
                 )
                 .child(
-                    text(&service.address)
-                        .font(type_::MONO_CAPTION)
-                        .color(k.c.text_muted),
+                    text(tr("sidebar.connect").to_uppercase())
+                        .font(micro(8.0, 900.0, 0.8))
+                        .color(p.primary),
                 ),
         );
     }
 
-    col()
-        .key("sidebar")
-        .w(300.0)
-        .min_h(0.0)
-        .gap(10.0)
+    let hub = section(
+        p,
+        12.0,
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(eyebrow(p, tr("sidebar.deviceHub"), 11.0).color(p.muted))
+            .child(row().grow(1.0))
+            .child(text_button(
+                p,
+                tr("sidebar.killAdb"),
+                p.subtle,
+                9.0,
+                |s: &mut Ui| s.kill_adb(),
+            ))
+            .child(text_button(
+                p,
+                tr("sidebar.refresh"),
+                p.primary,
+                9.0,
+                |s: &mut Ui| s.refresh_devices(),
+            )),
+        col()
+            .gap(10.0)
+            .child(device_rows.scroll(ScrollSpec {
+                stick_bottom: false,
+            }))
+            .child(tabs)
+            .child(
+                col()
+                    .gap(8.0)
+                    .child(section_label(p, tr("sidebar.usbSetupTip"), false))
+                    .child(tip_card(
+                        p,
+                        &format!(
+                            "{} {} {} {} {}",
+                            tr("sidebar.usbSetupTipTextBefore"),
+                            tr("sidebar.usbSetupTipDeveloperOptions"),
+                            tr("sidebar.usbSetupTipAnd"),
+                            tr("sidebar.usbSetupTipUsbDebugging"),
+                            tr("sidebar.usbSetupTipTextAfter")
+                        ),
+                    ))
+                    .child(section_label(p, tr("sidebar.ipConnect"), false))
+                    .child(
+                        row()
+                            .gap(6.0)
+                            .center_y()
+                            .child(ip_input)
+                            .child(solid_button(
+                                p,
+                                tr("sidebar.connect"),
+                                p.input,
+                                p.text,
+                                10.0,
+                                |s: &mut Ui| {
+                                    let ip = s.ip.text.clone();
+                                    s.connect(ip);
+                                },
+                            )),
+                    )
+                    .child(section_label(p, tr("sidebar.discoveredDevices"), true))
+                    .child(wifi_rows.max_h(100.0).scroll(ScrollSpec {
+                        stick_bottom: false,
+                    }))
+                    .child(
+                        row()
+                            .center_y()
+                            .child(eyebrow(p, tr("sidebar.recentDevices"), 9.0))
+                            .child(row().grow(1.0))
+                            .child(text_button(
+                                p,
+                                tr("sidebar.clear"),
+                                p.primary,
+                                8.0,
+                                |s: &mut Ui| s.clear_history(),
+                            )),
+                    )
+                    .child(recent.max_h(90.0).scroll(ScrollSpec {
+                        stick_bottom: false,
+                    }))
+                    .child(section_label(p, tr("sidebar.pairDeviceTitle"), false))
+                    .child(row().gap(8.0).child(pair_ip).child(pair_code))
+                    .child(ghost(p, tr("sidebar.startPairing"), 10.0, |s: &mut Ui| {
+                        let ip = s.pair_ip.text.clone();
+                        let code = s.pair_code.text.clone();
+                        s.pair(ip, code);
+                    })),
+            ),
+    );
+
+    let drop_zone = col()
+        .key("push")
+        .gap(6.0)
         .padding(12.0)
-        .fill(k.c.layer_01)
-        .radius(tok::radius::LG)
+        .center()
+        .fill(p.glass)
+        .border(2.0, p.border.alpha(0.5))
+        .radius(12.0)
+        .on_press_tx(|s: &mut Ui, tx: &mut rune::Tx| {
+            let opts = rune::FileDialogOptions {
+                title: t(&s.locale, "sidebar.flashPushFiles").to_string(),
+                ..Default::default()
+            }
+            .filter("Android App", &["apk"])
+            .filter("All files", &["*"]);
+            tx.open_file(
+                opts,
+                |s: &mut Ui, result: rune::file_dialog::FileDialogResult, _| {
+                    if let Ok(Some(path)) = result {
+                        s.handle_file(path);
+                    }
+                },
+            );
+        })
         .child(
             row()
-                .key("hub-title")
-                .h(26.0)
-                .center_y()
-                .child(
-                    text(tr("sidebar.hub"))
-                        .font(type_::SECTION)
-                        .color(k.c.text_base)
-                        .grow(1.0),
-                )
-                .child(
-                    Button::new(tr("sidebar.killAdb"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(|s: &mut Ui| s.kill_adb())
-                        .build(k),
-                )
-                .child(
-                    Button::new(tr("sidebar.refresh"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(|s: &mut Ui| {
-                            s.refresh_devices();
-                            s.refresh_mdns();
-                        })
-                        .build(k),
-                ),
-        )
-        .child(
-            devices
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .max_h(220.0)
-                .min_h(60.0)
-                .shrink(),
-        )
-        .child(tabs)
-        .child(
-            col()
-                .gap(6.0)
-                .child(
-                    row().gap(6.0).center_y().child(ip).child(
-                        Button::new(tr("sidebar.connect"))
-                            .variant(ButtonVariant::Contrast)
-                            .on_press(|s: &mut Ui| {
-                                let ip = s.ip.text.to_string();
-                                s.connect(ip);
-                            })
-                            .build(k),
-                    ),
-                )
-                .child(
-                    text(tr("sidebar.discovered"))
-                        .font(type_::LABEL)
-                        .color(k.c.text_muted),
-                )
-                .child(
-                    mdns.max_h(100.0)
-                        .scroll(ScrollSpec {
-                            stick_bottom: false,
-                        })
-                        .shrink()
-                        .min_h(0.0),
-                )
-                .child(row().gap(6.0).center_y().child(pair_ip).child(pair_code))
-                .child(
-                    Button::new(tr("sidebar.startPairing"))
-                        .variant(ButtonVariant::Outline)
-                        .on_press(|s: &mut Ui| {
-                            let ip = s.pair_ip.text.to_string();
-                            let code = s.pair_code.text.to_string();
-                            s.pair(ip, code);
-                        })
-                        .build(k),
-                ),
-        )
-        .child(
-            col()
-                .key("push")
-                .gap(4.0)
-                .padding(12.0)
+                .size(40.0, 40.0)
+                .radius(24.0)
                 .center()
-                .fill(k.c.layer_02)
-                .radius(tok::radius::MD)
-                .on_press_tx(|s: &mut Ui, tx: &mut rune::Tx| {
-                    let opts = rune::FileDialogOptions {
-                        title: tr_push_title(s),
-                        ..Default::default()
-                    }
-                    .filter("Android App", &["apk"])
-                    .filter("All files", &["*"]);
-                    tx.open_file(
-                        opts,
-                        |s: &mut Ui, result: rune::file_dialog::FileDialogResult, _| {
-                            if let Ok(Some(path)) = result {
-                                s.handle_file(path);
-                            }
-                        },
-                    );
-                })
-                .child(
-                    text(tr("sidebar.push"))
-                        .font(type_::BODY)
-                        .color(tok::accent(s.accent, s.dark)),
-                )
-                .child(
-                    text(tr("sidebar.pushSub"))
-                        .font(type_::LABEL)
-                        .color(k.c.text_muted),
-                ),
+                .fill(p.primary.alpha(0.1))
+                .child(text("↑").font(micro(24.0, 700.0, 0.0)).color(p.primary)),
         )
+        .child(
+            text(tr("sidebar.flashPushFiles").to_uppercase())
+                .font(micro(11.0, 900.0, 1.1))
+                .color(p.text),
+        )
+        .child(
+            text(tr("sidebar.flashPushSubtitle").to_uppercase())
+                .font(micro(9.0, 700.0, 0.3))
+                .color(p.subtle),
+        );
+
+    col()
+        .key("sidebar")
+        .w(270.0)
+        .min_h(0.0)
+        .gap(10.0)
+        .shrink()
+        .child(hub)
+        .child(drop_zone)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
 }
 
-fn tr_push_title(s: &Ui) -> String {
-    t(&s.locale, "sidebar.push").to_string()
-}
-
-fn center<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
-    let mut source = row().key("source").gap(6.0);
+fn center<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
+    let mut source = row()
+        .key("source")
+        .gap(6.0)
+        .padding(4.0)
+        .radius(12.0)
+        .fill(p.elevated.alpha(0.5))
+        .border(1.0, p.border);
     for mode in [
         SessionKind::Mirror,
         SessionKind::Camera,
         SessionKind::Desktop,
     ] {
+        let label = match mode {
+            SessionKind::Mirror => tr("controlPanel.screen"),
+            SessionKind::Camera => tr("controlPanel.camera"),
+            SessionKind::Desktop => tr("controlPanel.desktop"),
+        };
         let active = s.tab == mode;
         source = source.child(
-            Button::new(mode.label())
-                .variant(if active {
-                    ButtonVariant::Contrast
+            col()
+                .key(format!("source-{:?}", mode))
+                .grow(1.0)
+                .h(42.0)
+                .center()
+                .gap(6.0)
+                .radius(8.0)
+                .fill(if active {
+                    p.primary
                 } else {
-                    ButtonVariant::Outline
+                    Color::TRANSPARENT
                 })
                 .on_press(move |s: &mut Ui| s.tab = mode)
-                .build(k),
+                .child(
+                    text(match mode {
+                        SessionKind::Mirror => "▣",
+                        SessionKind::Camera => "◉",
+                        SessionKind::Desktop => "▦",
+                    })
+                    .font(micro(18.0, 700.0, 0.0))
+                    .color(if active { p.on_primary } else { p.muted }),
+                )
+                .child(
+                    text(label.to_uppercase())
+                        .font(micro(9.0, 900.0, 0.9))
+                        .color(if active { p.on_primary } else { p.muted }),
+                ),
         );
     }
 
+    let capture = section(
+        p,
+        10.0,
+        text(tr("controlPanel.captureSource").to_uppercase())
+            .font(micro(10.0, 900.0, 1.0))
+            .color(p.muted),
+        source,
+    );
+
     let running = s.running.get(&s.config.device).copied().unwrap_or(false);
-    let start_label = match s.tab {
-        SessionKind::Mirror => tr("control.start"),
-        SessionKind::Camera => tr("control.startCamera"),
-        SessionKind::Desktop => tr("control.startDesktop"),
+    let start_label = if running {
+        tr("controlPanel.stopSession")
+    } else {
+        match s.tab {
+            SessionKind::Mirror => tr("controlPanel.startMission"),
+            SessionKind::Camera => tr("controlPanel.engageCamera"),
+            SessionKind::Desktop => tr("controlPanel.ejectToDesktop"),
+        }
+    };
+    let action = el()
+        .key("start-stop")
+        .h(52.0)
+        .radius(16.0)
+        .fill(if running { hex("991b1b") } else { p.primary })
+        .border(
+            1.0,
+            if running {
+                p.danger.alpha(0.5)
+            } else {
+                p.primary
+            },
+        )
+        .center()
+        .on_press(move |s: &mut Ui| {
+            let device = s.config.device.clone();
+            if running {
+                s.stop_session(&device);
+            } else {
+                s.start_session();
+            }
+        })
+        .child(
+            text(start_label.to_uppercase())
+                .font(micro(16.0, 900.0, 3.2))
+                .color(if running { Color::WHITE } else { p.on_primary }),
+        );
+
+    let config = match s.tab {
+        SessionKind::Mirror => mirror_config(s, p, k, layer, tr),
+        SessionKind::Camera => camera_config(s, p, k, layer, tr),
+        SessionKind::Desktop => desktop_config(s, p, k, layer, tr),
     };
 
     col()
@@ -471,632 +805,662 @@ fn center<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr:
         .min_w(0.0)
         .min_h(0.0)
         .gap(10.0)
-        .child(section(k, tr("control.capture"), source))
+        .child(capture)
+        .child(section(
+            p,
+            10.0,
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(tr("controlPanel.engineConfiguration").to_uppercase())
+                        .font(micro(11.0, 900.0, 1.1))
+                        .color(p.muted),
+                )
+                .child(row().grow(1.0))
+                .child(badge(p, tr("controlPanel.active"), p.success))
+                .child(badge(p, tr("controlPanel.otgOnly"), p.danger)),
+            col().gap(6.0).child(config).child(action),
+        ))
+        .child(log_panel(s, p, tr))
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+}
+
+fn mirror_config<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
+    col()
+        .key("mirror")
+        .gap(10.0)
         .child(
             col()
-                .key("engine-card")
-                .gap(10.0)
-                .padding(12.0)
-                .fill(k.c.layer_01)
-                .radius(tok::radius::LG)
+                .gap(8.0)
+                .padding(8.0)
+                .radius(12.0)
+                .fill(p.elevated.alpha(0.2))
+                .border(1.0, p.border)
+                .child(
+                    text(tr("controlPanel.inputEnhancements").to_uppercase())
+                        .font(micro(9.0, 900.0, 1.0))
+                        .color(p.muted),
+                )
+                .child(
+                    text(tr("controlPanel.inputEnhancementsDescription"))
+                        .font(micro(8.0, 400.0, 0.0))
+                        .color(p.subtle),
+                )
                 .child(
                     row()
-                        .gap(8.0)
-                        .center_y()
-                        .child(
-                            text(tr("control.engine"))
-                                .font(type_::SECTION)
-                                .color(k.c.text_base)
-                                .grow(1.0),
-                        )
-                        .child(
-                            text(if running {
-                                tr("control.active")
-                            } else {
-                                tr("control.ready")
-                            })
-                            .font(type_::LABEL)
-                            .color(if running {
-                                tok::accent(3, s.dark)
-                            } else {
-                                k.c.text_muted
-                            }),
-                        ),
-                )
-                .child(config_body(s, k, layer, tr))
-                .child(
-                    Button::new(if running {
-                        tr("control.stop")
-                    } else {
-                        start_label
-                    })
-                    .variant(if running {
-                        ButtonVariant::Danger
-                    } else {
-                        ButtonVariant::Submit
-                    })
-                    .on_press(move |s: &mut Ui| {
-                        let device = s.config.device.clone();
-                        if !running {
-                            s.start_session();
-                        } else {
-                            s.stop_session(&device);
-                        }
-                    })
-                    .build(k),
+                        .gap(12.0)
+                        .child(checkbox(
+                            p,
+                            tr("controlPanel.hidKeyboard"),
+                            s.config.hid_keyboard.unwrap_or(false),
+                            |s| flip(&mut s.config.hid_keyboard, false),
+                        ))
+                        .child(checkbox(
+                            p,
+                            tr("controlPanel.hidMouse"),
+                            s.config.hid_mouse.unwrap_or(false),
+                            |s| flip(&mut s.config.hid_mouse, false),
+                        ))
+                        .child(checkbox(
+                            p,
+                            tr("controlPanel.pureHid"),
+                            s.config.otg_pure.unwrap_or(false),
+                            |s| flip(&mut s.config.otg_pure, false),
+                        )),
                 ),
         )
-        .child(log_panel(s, k, tr))
+        .child(perf_grid(s, p, k, layer, tr, true, false))
+        .child(bitrate(s, p, tr))
 }
 
-fn config_body<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
-    match s.tab {
-        SessionKind::Mirror => mirror_config(s, k, layer, tr),
-        SessionKind::Camera => camera_config(s, k, layer, tr),
-        SessionKind::Desktop => desktop_config(s, k, layer, tr),
-    }
-}
-
-fn mirror_config<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
+fn camera_config<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
     col()
-        .key("mirror-config")
+        .key("camera")
         .gap(10.0)
         .child(
-            text(tr("control.inputEnhancements"))
-                .font(type_::LABEL)
-                .color(k.c.text_muted),
+            col()
+                .gap(6.0)
+                .padding(8.0)
+                .radius(12.0)
+                .fill(p.primary.alpha(0.05))
+                .border(1.0, p.primary.alpha(0.2))
+                .child(
+                    text(tr("controlPanel.webcamProTip").to_uppercase())
+                        .font(micro(10.0, 900.0, 1.0))
+                        .color(p.primary),
+                )
+                .child(
+                    text(tr("controlPanel.webcamProTipTextBefore"))
+                        .font(micro(10.0, 400.0, 0.0))
+                        .color(p.muted)
+                        .wrap(),
+                ),
         )
-        .child(
-            row()
-                .gap(12.0)
-                .child(switch(
-                    k,
-                    tr("control.hidKeyboard"),
-                    s.config.hid_keyboard.unwrap_or(false),
-                    |s| flip(&mut s.config.hid_keyboard, false),
-                ))
-                .child(switch(
-                    k,
-                    tr("control.hidMouse"),
-                    s.config.hid_mouse.unwrap_or(false),
-                    |s| flip(&mut s.config.hid_mouse, false),
-                ))
-                .child(switch(
-                    k,
-                    tr("control.pureHid"),
-                    s.config.otg_pure.unwrap_or(false),
-                    |s| flip(&mut s.config.otg_pure, false),
-                )),
-        )
-        .child(perf_grid(s, k, layer, tr, true))
-        .child(stepper(
-            k,
-            tr("control.bitrate"),
-            s.config.bitrate.unwrap_or(8),
-            "bitrate",
-            1,
-            50,
-            1,
-            tr,
-        ))
-}
-
-fn camera_config<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
-    col()
-        .key("camera-config")
-        .gap(10.0)
         .child(
             row()
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text(tr("control.lens"))
-                        .font(type_::BODY)
-                        .color(k.c.text_base)
+                    text(tr("controlPanel.cameraDevice").to_uppercase())
+                        .font(micro(9.0, 900.0, 0.8))
+                        .color(p.muted)
                         .grow(1.0),
                 )
                 .child(select(
                     s,
+                    p,
                     k,
                     layer,
                     "lens",
                     LENSES,
                     s.config.camera_id.as_deref().unwrap_or("Auto Select"),
-                    tr("control.lens"),
-                ))
-                .child(
-                    Button::new(tr("control.refreshLenses"))
-                        .variant(ButtonVariant::Ghost)
-                        .build(k),
-                ),
+                    tr("controlPanel.cameraDevice"),
+                )),
         )
         .child(
             row()
                 .gap(8.0)
                 .center_y()
                 .child(
-                    text(tr("control.aspect"))
-                        .font(type_::BODY)
-                        .color(k.c.text_base)
+                    text(tr("controlPanel.aspect").to_uppercase())
+                        .font(micro(9.0, 900.0, 0.8))
+                        .color(p.muted)
                         .grow(1.0),
                 )
                 .child(select(
                     s,
+                    p,
                     k,
                     layer,
                     "aspect",
                     ASPECT,
                     s.config.camera_ar.as_deref().unwrap_or("0"),
-                    tr("control.aspect"),
+                    tr("controlPanel.aspect"),
                 )),
         )
         .child(
             row()
-                .gap(12.0)
-                .child(switch(
-                    k,
-                    tr("control.torch"),
+                .gap(16.0)
+                .child(checkbox(
+                    p,
+                    tr("controlPanel.cameraTorch"),
                     s.config.camera_torch.unwrap_or(false),
                     |s| flip(&mut s.config.camera_torch, false),
                 ))
-                .child(stepper(
-                    k,
-                    tr("control.zoom"),
-                    (s.config.camera_zoom.unwrap_or(1.0) * 10.0) as u32,
+                .child(slider_row(
+                    p,
+                    tr("controlPanel.cameraZoom"),
+                    &format!("{:.1}x", s.config.camera_zoom.unwrap_or(1.0)),
+                    s.config.camera_zoom.unwrap_or(1.0) / 5.0,
                     "zoom",
-                    10,
-                    50,
-                    1,
-                    tr,
+                    s,
                 )),
         )
-        .child(perf_grid(s, k, layer, tr, false))
-        .child(stepper(
-            k,
-            tr("control.bitrate"),
-            s.config.bitrate.unwrap_or(8),
-            "bitrate",
-            1,
-            50,
-            1,
-            tr,
-        ))
+        .child(perf_grid(s, p, k, layer, tr, false, true))
+        .child(bitrate(s, p, tr))
 }
 
-fn desktop_config<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
+fn desktop_config<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
     col()
-        .key("desktop-config")
+        .key("desktop")
         .gap(10.0)
         .child(
-            row()
+            col()
                 .gap(8.0)
-                .center_y()
+                .padding(10.0)
+                .radius(12.0)
+                .fill(p.elevated.alpha(0.4))
+                .border(1.0, p.border)
                 .child(
-                    text(tr("control.virtualDisplay"))
-                        .font(type_::LABEL)
-                        .color(k.c.text_muted)
-                        .grow(1.0),
+                    row()
+                        .gap(8.0)
+                        .center_y()
+                        .child(
+                            text(tr("controlPanel.virtualDisplayEngine").to_uppercase())
+                                .font(micro(10.0, 900.0, 1.0))
+                                .color(p.muted)
+                                .grow(1.0),
+                        )
+                        .child(badge(p, tr("controlPanel.flexDisplay"), p.primary)),
                 )
-                .child(switch(
-                    k,
-                    tr("control.flex"),
-                    s.config.flex_display.unwrap_or(false),
-                    |s| flip(&mut s.config.flex_display, false),
-                )),
+                .child(
+                    row()
+                        .gap(16.0)
+                        .child(slider_row(
+                            p,
+                            tr("controlPanel.width"),
+                            &s.config.vd_width.unwrap_or(1920).to_string(),
+                            s.config.vd_width.unwrap_or(1920) as f32 / 3840.0,
+                            "vdWidth",
+                            s,
+                        ))
+                        .child(slider_row(
+                            p,
+                            tr("controlPanel.height"),
+                            &s.config.vd_height.unwrap_or(1080).to_string(),
+                            s.config.vd_height.unwrap_or(1080) as f32 / 2160.0,
+                            "vdHeight",
+                            s,
+                        )),
+                )
+                .child(
+                    row()
+                        .gap(16.0)
+                        .child(slider_row(
+                            p,
+                            tr("controlPanel.uiScaling"),
+                            &s.config.vd_dpi.unwrap_or(420).to_string(),
+                            s.config.vd_dpi.unwrap_or(420) as f32 / 640.0,
+                            "vdDpi",
+                            s,
+                        ))
+                        .child(
+                            row()
+                                .gap(8.0)
+                                .center_y()
+                                .child(
+                                    text(tr("controlPanel.quickPresets").to_uppercase())
+                                        .font(micro(8.0, 900.0, 0.6))
+                                        .color(p.muted),
+                                )
+                                .child(select(
+                                    s,
+                                    p,
+                                    k,
+                                    layer,
+                                    "preset",
+                                    PRESETS,
+                                    "Custom",
+                                    tr("controlPanel.quickPresets"),
+                                )),
+                        ),
+                ),
         )
+        .child(perf_grid(s, p, k, layer, tr, false, true))
+        .child(bitrate(s, p, tr))
         .child(
             row()
                 .gap(8.0)
                 .center_y()
-                .child(stepper(
-                    k,
-                    tr("control.width"),
-                    s.config.vd_width.unwrap_or(1920),
-                    "vdWidth",
-                    480,
-                    3840,
-                    160,
-                    tr,
-                ))
-                .child(stepper(
-                    k,
-                    tr("control.height"),
-                    s.config.vd_height.unwrap_or(1080),
-                    "vdHeight",
-                    360,
-                    2160,
-                    90,
-                    tr,
-                ))
-                .child(stepper(
-                    k,
-                    tr("control.dpi"),
-                    s.config.vd_dpi.unwrap_or(420),
-                    "vdDpi",
-                    120,
-                    640,
-                    20,
-                    tr,
-                ))
-                .child(select(
-                    s,
-                    k,
-                    layer,
-                    "preset",
-                    PRESETS,
-                    "Custom",
-                    tr("control.width"),
-                )),
-        )
-        .child(perf_grid(s, k, layer, tr, false))
-        .child(stepper(
-            k,
-            tr("control.bitrate"),
-            s.config.bitrate.unwrap_or(8),
-            "bitrate",
-            1,
-            50,
-            1,
-            tr,
-        ))
-        .child(
-            row()
-                .gap(8.0)
-                .center_y()
                 .child(
-                    text(tr("control.bgColor"))
-                        .font(type_::BODY)
-                        .color(k.c.text_base)
+                    text(tr("controlPanel.backgroundColor").to_uppercase())
+                        .font(micro(9.0, 900.0, 0.8))
+                        .color(p.muted)
                         .grow(1.0),
                 )
+                .child(el().size(20.0, 20.0).radius(4.0).fill(hex(
+                    s.config.background_color.as_deref().unwrap_or("#000000"),
+                )))
                 .child(
                     TextInput::new(&s.background_color)
+                        .plain()
                         .label("Background color")
-                        .placeholder("#000000")
-                        .width(Some(120.0))
+                        .width(Some(100.0))
                         .on_edit(|s: &mut Ui| &mut s.background_color)
                         .build(k),
                 )
-                .child(
-                    Button::new(tr("control.default"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(|s: &mut Ui| {
-                            s.config.background_color = None;
-                            s.background_color.replace_text("");
-                        })
-                        .build(k),
-                ),
+                .child(text_button(
+                    p,
+                    tr("controlPanel.rendererAuto"),
+                    p.subtle,
+                    8.0,
+                    |s: &mut Ui| {
+                        s.config.background_color = None;
+                        s.background_color.replace_text("");
+                    },
+                )),
         )
 }
 
 fn perf_grid<F: Fn(&str) -> &'static str>(
     s: &Ui,
+    p: &Palette,
     k: &Kit,
     layer: &mut Vec<El>,
     tr: &F,
     with_res: bool,
+    two_cols: bool,
 ) -> El {
-    let mut grid = col().key("perf").gap(6.0);
+    let mut grid = row().key("perf").gap(8.0);
+    if two_cols {
+        grid = grid.w_full();
+    }
+    let mut fields: Vec<El> = Vec::new();
     if with_res {
-        grid = grid.child(grid_row(
-            k,
-            tr("control.resolution"),
+        fields.push(field(
+            p,
+            tr("controlPanel.resolution"),
             select(
                 s,
+                p,
                 k,
                 layer,
                 "res",
                 RES,
                 s.config.res.as_deref().unwrap_or("0"),
-                tr("control.resolution"),
+                tr("controlPanel.resolution"),
             ),
         ));
     }
-    grid = grid
-        .child(grid_row(
+    fields.push(field(
+        p,
+        tr("controlPanel.fps"),
+        select(
+            s,
+            p,
             k,
-            tr("control.fps"),
-            select(
-                s,
-                k,
-                layer,
-                "fps",
-                FPS,
-                s.config
-                    .fps
-                    .map(|v| if v == 0 { "Auto" } else { "60" })
-                    .unwrap_or("Auto"),
-                tr("control.fps"),
-            ),
-        ))
-        .child(grid_row(
+            layer,
+            "fps",
+            FPS,
+            s.config
+                .fps
+                .map(|v| if v == 0 { "Auto" } else { "60" })
+                .unwrap_or("Auto"),
+            tr("controlPanel.fps"),
+        ),
+    ));
+    fields.push(field(
+        p,
+        tr("controlPanel.rotation"),
+        select(
+            s,
+            p,
             k,
-            tr("control.rotation"),
-            select(
-                s,
-                k,
-                layer,
-                "rotation",
-                ROT,
-                s.config.rotation.as_deref().unwrap_or("0"),
-                tr("control.rotation"),
-            ),
-        ))
-        .child(grid_row(
+            layer,
+            "rotation",
+            ROT,
+            s.config.rotation.as_deref().unwrap_or("0"),
+            tr("controlPanel.rotation"),
+        ),
+    ));
+    fields.push(field(
+        p,
+        tr("controlPanel.codec"),
+        select(
+            s,
+            p,
             k,
-            tr("control.codec"),
-            select(
-                s,
-                k,
-                layer,
-                "codec",
-                CODEC,
-                s.config.codec.as_deref().unwrap_or("h264"),
-                tr("control.codec"),
-            ),
-        ))
-        .child(grid_row(
+            layer,
+            "codec",
+            CODEC,
+            s.config.codec.as_deref().unwrap_or("h264"),
+            tr("controlPanel.codec"),
+        ),
+    ));
+    fields.push(field(
+        p,
+        tr("controlPanel.graphicsRenderer"),
+        select(
+            s,
+            p,
             k,
-            tr("control.renderer"),
-            select(
-                s,
-                k,
-                layer,
-                "renderer",
-                RENDERERS,
-                s.config.render_driver.as_deref().unwrap_or("Auto"),
-                tr("control.renderer"),
-            ),
-        ))
-        .child(grid_row(
+            layer,
+            "renderer",
+            RENDERERS,
+            s.config.render_driver.as_deref().unwrap_or("Auto"),
+            tr("controlPanel.graphicsRenderer"),
+        ),
+    ));
+    fields.push(field(
+        p,
+        tr("controlPanel.hardwareDecoding"),
+        select(
+            s,
+            p,
             k,
-            tr("control.hwdec"),
-            select(
-                s,
-                k,
-                layer,
-                "hwdec",
-                HWDEC,
-                s.config.hwdec.as_deref().unwrap_or("auto"),
-                tr("control.hwdec"),
-            ),
-        ))
-        .child(
-            row()
-                .gap(12.0)
-                .child(switch(
-                    k,
-                    tr("control.vsync"),
-                    s.config.vsync.unwrap_or(true),
-                    |s| flip(&mut s.config.vsync, true),
-                ))
-                .child(switch(
-                    k,
-                    tr("control.ignoreConstraints"),
-                    s.config.ignore_video_encoder_constraints.unwrap_or(false),
-                    |s| flip(&mut s.config.ignore_video_encoder_constraints, false),
-                )),
-        );
-    grid
+            layer,
+            "hwdec",
+            HWDEC,
+            s.config.hwdec.as_deref().unwrap_or("auto"),
+            tr("controlPanel.hardwareDecoding"),
+        ),
+    ));
+
+    let _ = grid;
+    let mut rows = col().key("perf").gap(8.0);
+    for chunk in fields.chunks(if two_cols { 2 } else { 3 }) {
+        let mut r = row().gap(8.0);
+        for f in chunk {
+            r = r.child(f.clone());
+        }
+        rows = rows.child(r);
+    }
+    rows.child(
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(checkbox(
+                p,
+                tr("controlPanel.vsync"),
+                s.config.vsync.unwrap_or(true),
+                |s| flip(&mut s.config.vsync, true),
+            ))
+            .child(checkbox(
+                p,
+                tr("controlPanel.ignoreEncoderConstraints"),
+                s.config.ignore_video_encoder_constraints.unwrap_or(false),
+                |s| flip(&mut s.config.ignore_video_encoder_constraints, false),
+            )),
+    )
 }
 
-fn grid_row(k: &Kit, label: &str, control: El) -> El {
-    row()
-        .h(30.0)
-        .px(4.0)
-        .gap(8.0)
-        .center_y()
-        .child(
-            text(label)
-                .font(type_::BODY)
-                .color(k.c.text_muted)
-                .grow(1.0),
-        )
-        .child(control)
-}
-
-fn right<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, layer: &mut Vec<El>, tr: &F) -> El {
-    let toggles = col()
-        .key("behavior")
-        .gap(2.0)
-        .child(toggle_row(
-            k,
-            tr("session.awake"),
+fn right<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
+    let mut toggles = col().key("behavior").gap(2.0);
+    let rows: [ToggleRow; 9] = [
+        (
+            "sessionBehavior.stayAwake",
             s.config.stay_awake.unwrap_or(false),
             |s| flip(&mut s.config.stay_awake, false),
-        ))
-        .child(toggle_row(
-            k,
-            tr("session.keepActive"),
+        ),
+        (
+            "sessionBehavior.keepActive",
             s.config.keep_active.unwrap_or(false),
             |s| flip(&mut s.config.keep_active, false),
-        ))
-        .child(toggle_row(
-            k,
-            tr("session.screenOff"),
+        ),
+        (
+            "sessionBehavior.screenOff",
             s.config.turn_off.unwrap_or(false),
             |s| flip(&mut s.config.turn_off, false),
-        ))
-        .child(toggle_row(
-            k,
-            tr("session.audio"),
+        ),
+        (
+            "sessionBehavior.forwardAudio",
             s.config.audio_enabled.unwrap_or(true),
             |s| flip(&mut s.config.audio_enabled, true),
-        ))
-        .child(
-            row()
-                .h(30.0)
-                .px(4.0)
-                .center_y()
-                .child(
-                    text(tr("session.audioCodec"))
-                        .font(type_::BODY)
-                        .color(k.c.text_muted)
-                        .grow(1.0),
-                )
-                .child(select(
-                    s,
-                    k,
-                    layer,
-                    "audio",
-                    AUDIO_CODEC,
-                    s.config.audio_codec.as_deref().unwrap_or("auto"),
-                    tr("session.audioCodec"),
-                )),
-        )
-        .child(toggle_row(
-            k,
-            tr("session.alwaysOnTop"),
+        ),
+        (
+            "sessionBehavior.alwaysOnTop",
             s.config.always_on_top.unwrap_or(false),
             |s| flip(&mut s.config.always_on_top, false),
-        ))
-        .child(toggle_row(
-            k,
-            tr("session.fullscreen"),
+        ),
+        (
+            "sessionBehavior.fullScreen",
             s.config.fullscreen.unwrap_or(false),
             |s| flip(&mut s.config.fullscreen, false),
-        ))
-        .child(toggle_row(
-            k,
-            tr("session.borderless"),
+        ),
+        (
+            "sessionBehavior.borderless",
             s.config.borderless.unwrap_or(false),
             |s| flip(&mut s.config.borderless, false),
-        ))
-        .child(toggle_row(k, tr("session.remember"), true, |_| {}))
-        .child(toggle_row(
-            k,
-            tr("session.record"),
+        ),
+        ("sessionBehavior.rememberWindowPosition", true, |_| {}),
+        (
+            "sessionBehavior.recordFeed",
             s.config.record.unwrap_or(false),
             |s| flip(&mut s.config.record, false),
-        ))
-        .child(
-            row()
-                .h(30.0)
-                .px(4.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(tr("session.recordPath"))
-                        .font(type_::BODY)
-                        .color(k.c.text_muted)
-                        .grow(1.0)
-                        .truncate(),
-                )
-                .child(
-                    Button::new(tr("session.change"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press_tx(|_s: &mut Ui, tx: &mut rune::Tx| {
-                            let opts = rune::FileDialogOptions {
-                                title: "Recording folder".into(),
-                                ..Default::default()
-                            };
-                            tx.open_folder(
-                                opts,
-                                |s: &mut Ui, result: rune::file_dialog::FileDialogResult, _| {
-                                    if let Ok(Some(path)) = result {
-                                        s.set_record_path(path.to_string_lossy().to_string());
-                                    }
-                                },
-                            );
-                        })
-                        .build(k),
-                ),
-        )
-        .child(
-            text(
-                s.config
-                    .record_path
-                    .as_deref()
-                    .unwrap_or(tr("session.defaultVideos")),
-            )
-            .font(type_::MONO_CAPTION)
-            .color(k.c.text_faint)
-            .truncate(),
-        );
+        ),
+    ];
+    for (key, on, handler) in rows {
+        toggles = toggles.child(toggle_row(
+            p,
+            tr(key),
+            on,
+            key == "sessionBehavior.recordFeed",
+            handler,
+        ));
+    }
+    toggles = toggles.child(
+        row()
+            .gap(8.0)
+            .center_y()
+            .child(eyebrow(p, tr("sessionBehavior.audioCodec"), 8.0))
+            .child(select(
+                s,
+                p,
+                k,
+                layer,
+                "audio",
+                AUDIO_CODEC,
+                s.config.audio_codec.as_deref().unwrap_or("auto"),
+                tr("sessionBehavior.audioCodec"),
+            )),
+    );
 
-    let shortcuts = col()
-        .key("shortcuts")
-        .gap(4.0)
-        .child(
-            text(tr("shortcuts.title"))
-                .font(type_::SECTION)
-                .color(k.c.text_base),
-        )
-        .child(
-            row()
-                .gap(4.0)
-                .child(shortcut_chip(k, "Alt+F", tr("session.fullscreen")))
-                .child(shortcut_chip(k, "Alt+H", "Home"))
-                .child(shortcut_chip(k, "Alt+B", "Back"))
-                .child(shortcut_chip(k, "Alt+S", "Recents")),
-        )
-        .child(
-            row()
-                .gap(4.0)
-                .child(shortcut_chip(k, "Alt+P", "Power"))
-                .child(shortcut_chip(k, "Alt+R", "Rotate"))
-                .child(shortcut_chip(k, "Alt+V", "Paste"))
-                .child(shortcut_chip(k, "Alt+O", "Off")),
-        )
-        .child(
-            text("Ctrl+Alt+Shift+C  Recenter  ·  Ctrl+Alt+Shift+W  Drag")
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_faint)
-                .wrap()
-                .w_full(),
-        );
+    let record_path = s.config.record_path.as_deref().unwrap_or("");
+    toggles = toggles.child(
+        col()
+            .gap(4.0)
+            .pt(8.0)
+            .child(
+                row()
+                    .gap(8.0)
+                    .center_y()
+                    .child(text("▱").font(micro(12.0, 400.0, 0.0)).color(p.subtle))
+                    .child(eyebrow(p, tr("sessionBehavior.recordPath"), 9.0))
+                    .child(row().grow(1.0))
+                    .child(folder_button(p, tr("sessionBehavior.change"), |s, path| {
+                        s.set_record_path(path.to_string_lossy().to_string());
+                    })),
+            )
+            .child(
+                row()
+                    .padding(8.0)
+                    .radius(8.0)
+                    .fill(p.elevated.alpha(0.4))
+                    .border(1.0, p.border.alpha(0.5))
+                    .child(
+                        text(if record_path.is_empty() {
+                            tr("sessionBehavior.defaultVideosFolder")
+                        } else {
+                            record_path
+                        })
+                        .font(mono(9.0))
+                        .color(p.subtle)
+                        .truncate(),
+                    ),
+            ),
+    );
+
+    let mut shortcuts = col().key("shortcuts").gap(4.0);
+    let keys = [
+        ("Alt+F", tr("shortcuts.full")),
+        ("Alt+H", tr("shortcuts.home")),
+        ("Alt+B", tr("shortcuts.back")),
+        ("Alt+S", tr("shortcuts.recents")),
+        ("Alt+P", tr("shortcuts.power")),
+        ("Alt+R", tr("shortcuts.rotate")),
+        ("Alt+V", tr("shortcuts.paste")),
+        ("Alt+O", tr("shortcuts.off")),
+    ];
+    for pair in keys.chunks(4) {
+        let mut r = row().gap(8.0);
+        for (key, label) in pair {
+            r = r.child(
+                col()
+                    .key(*key)
+                    .w(52.0)
+                    .h(44.0)
+                    .center()
+                    .gap(4.0)
+                    .fill(p.elevated.alpha(0.3))
+                    .radius(8.0)
+                    .child(text("◆").font(micro(14.0, 400.0, 0.0)).color(p.subtle))
+                    .child(text(*key).font(micro(9.0, 900.0, 0.5)).color(p.muted)),
+            );
+            let _ = label;
+        }
+        shortcuts = shortcuts.child(r);
+    }
 
     col()
         .key("right")
-        .w(290.0)
+        .w(270.0)
         .min_h(0.0)
-        .gap(10.0)
-        .child(section(k, tr("session.title"), toggles))
-        .child(section(k, "Info", shortcuts))
+        .gap(16.0)
+        .shrink()
+        .child(section(
+            p,
+            16.0,
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(text("⚙").font(micro(12.0, 400.0, 0.0)).color(p.subtle))
+                .child(eyebrow(p, tr("sessionBehavior.title"), 10.0)),
+            toggles,
+        ))
+        .child(section(
+            p,
+            16.0,
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(text("⌨").font(micro(12.0, 400.0, 0.0)).color(p.subtle))
+                .child(eyebrow(p, tr("shortcuts.title"), 10.0)),
+            shortcuts,
+        ))
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
 }
 
-fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, tr: &F) -> El {
-    let mut lines = col().key("log-lines").gap(1.0);
+fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
+    let mut lines = col().key("logs").gap(1.0);
     if s.logs.is_empty() {
         lines = lines.child(
-            text(tr("log.empty"))
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_faint),
+            text(tr("logPanel.waitingForSequence").to_uppercase())
+                .font(micro(10.0, 700.0, 1.6))
+                .color(p.subtle),
         );
     }
     for (i, line) in s.logs.iter().enumerate() {
         lines = lines.child(
-            text(line.clone())
+            row()
                 .key(format!("log-{i}"))
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_base)
-                .wrap(),
+                .gap(12.0)
+                .pl(12.0)
+                .child(
+                    text(chrono::Local::now().format("%H:%M:%S").to_string())
+                        .font(mono(11.0))
+                        .color(p.subtle),
+                )
+                .child(text(line.clone()).font(mono(11.0)).color(p.text).wrap()),
         );
     }
     col()
-        .key("log")
+        .key("console")
         .h(220.0)
+        .radius(16.0)
         .padding(10.0)
         .gap(6.0)
-        .fill(k.c.bg_deep)
-        .radius(tok::radius::MD)
+        .fill(hex("09090b").alpha(0.94))
+        .radial_gradient(
+            [0.0, 0.0],
+            420.0,
+            [(0.0, p.primary.alpha(0.03)), (1.0, Color::TRANSPARENT)],
+        )
+        .border(1.0, hex("ffffff").alpha(0.07))
         .child(
             row()
-                .key("log-bar")
-                .h(24.0)
+                .h(28.0)
+                .gap(8.0)
                 .center_y()
+                .child(text("_").font(mono(12.0)).color(p.primary))
                 .child(
-                    text(tr("log.console"))
-                        .font(type_::LABEL)
-                        .color(k.c.text_base)
+                    text(tr("logPanel.systemConsole").to_uppercase())
+                        .font(micro(9.0, 900.0, 1.8))
+                        .color(p.muted)
                         .grow(1.0),
                 )
-                .child(
-                    Button::new(tr("log.clear"))
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(|s: &mut Ui| s.logs.clear())
-                        .build(k),
-                ),
+                .child(text_button(
+                    p,
+                    tr("logPanel.report"),
+                    p.primary,
+                    9.0,
+                    |s: &mut Ui| s.export_report(),
+                ))
+                .child(text_button(
+                    p,
+                    tr("logPanel.clear"),
+                    p.subtle,
+                    9.0,
+                    |s: &mut Ui| s.logs.clear(),
+                )),
         )
         .child(
             lines
@@ -1107,229 +1471,626 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, tr: &F) -> El {
         )
         .child(
             row()
-                .key("prompt")
-                .gap(6.0)
+                .gap(8.0)
                 .center_y()
-                .child(
-                    text("$")
-                        .font(type_::MONO_CAPTION)
-                        .color(tok::accent(s.accent, s.dark)),
-                )
+                .child(text("$").font(mono(11.0)).color(p.primary))
                 .child(
                     TextInput::new(&s.command)
+                        .plain()
                         .label("Command")
-                        .placeholder("adb shell ...")
+                        .placeholder(tr("logPanel.terminalPlaceholder"))
                         .width(None)
                         .on_edit(|s: &mut Ui| &mut s.command)
                         .on_submit(|s: &mut Ui, _| {
-                            let cmd = s.command.text.to_string();
+                            let cmd = s.command.text.clone();
                             s.run_command(cmd);
                             s.command.replace_text("");
                         })
-                        .build(k),
+                        .build(&kit(p)),
                 ),
         )
 }
 
-fn footer<F: Fn(&str) -> &'static str>(k: &Kit, tr: &F) -> El {
-    row()
+fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
+    col()
         .key("footer")
-        .h(38.0)
-        .px(14.0)
-        .gap(10.0)
-        .center_y()
-        .fill(k.c.bg_base)
-        .border(1.0, k.c.border_muted)
+        .w_full()
+        .py(8.0)
+        .px(24.0)
+        .gap(6.0)
+        .fill(p.glass)
+        .border(1.0, p.border)
         .child(
-            text(tr("footer.about"))
-                .font(type_::LABEL)
-                .color(k.c.text_muted)
-                .grow(1.0),
+            text(tr("footer.aboutScrcpyGui").to_uppercase())
+                .font(micro(12.0, 900.0, 1.2))
+                .color(p.muted)
+                .center(),
         )
         .child(
-            text("Core: scrcpy  ·  Client: Rune  ·  UI: Rust")
-                .font(type_::LABEL)
-                .color(k.c.text_muted),
+            row()
+                .gap(32.0)
+                .center()
+                .child(
+                    text(tr("footer.github").to_uppercase())
+                        .font(micro(9.0, 700.0, 0.8))
+                        .color(p.subtle),
+                )
+                .child(
+                    text(tr("footer.youtube").to_uppercase())
+                        .font(micro(9.0, 700.0, 0.8))
+                        .color(p.subtle),
+                )
+                .child(
+                    text(tr("footer.website").to_uppercase())
+                        .font(micro(9.0, 700.0, 0.8))
+                        .color(p.subtle),
+                )
+                .child(
+                    text(tr("footer.support").to_uppercase())
+                        .font(micro(9.0, 700.0, 0.8))
+                        .color(p.primary),
+                ),
         )
         .child(
-            text("v4.1.0")
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_faint),
+            row().gap(20.0).center().child(
+                text(format!(
+                    "{}: SCRCPY  {}: RUNE  {}: RUST",
+                    tr("footer.core").to_uppercase(),
+                    tr("footer.client").to_uppercase(),
+                    tr("footer.ui").to_uppercase()
+                ))
+                .font(micro(9.0, 900.0, 0.6))
+                .color(p.subtle),
+            ),
+        )
+        .child(
+            text(
+                tv(
+                    "zh-CN",
+                    "footer.appVersion",
+                    &[("version", env!("CARGO_PKG_VERSION"))],
+                )
+                .to_uppercase(),
+            )
+            .font(micro(10.0, 400.0, 0.0))
+            .color(p.subtle)
+            .center(),
         )
 }
 
-fn onboarding<F: Fn(&str) -> &'static str>(s: &Ui, k: &Kit, tr: &F) -> El {
+fn onboarding<F: Fn(&str) -> &'static str>(_s: &Ui, p: &Palette, tr: &F) -> El {
     col()
-        .key("onboarding-scrim")
+        .key("onboarding")
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .center()
-        .fill(k.c.black.alpha(0.62))
+        .fill(hex("000000").alpha(0.8))
+        .child(
+            row()
+                .key("onboarding-panel")
+                .w(672.0)
+                .radius(24.0)
+                .fill(p.elevated)
+                .border(1.0, p.border)
+                .child(
+                    col()
+                        .w(224.0)
+                        .padding(32.0)
+                        .gap(16.0)
+                        .fill(p.primary.alpha(0.1))
+                        .child(
+                            text("SCRCPY GUI")
+                                .font(TextStyle::new(30.0, 900.0).italic())
+                                .color(p.text),
+                        )
+                        .child(
+                            text(tr("onboarding.setupCoreComponents").to_uppercase())
+                                .font(micro(10.0, 900.0, 1.0))
+                                .color(p.primary),
+                        )
+                        .child(
+                            text(tr("onboarding.introQuote"))
+                                .font(micro(10.0, 400.0, 0.0))
+                                .color(p.muted)
+                                .wrap(),
+                        ),
+                )
+                .child(
+                    col()
+                        .grow(1.0)
+                        .padding(48.0)
+                        .gap(16.0)
+                        .child(
+                            text(tr("onboarding.setupCoreComponents").to_uppercase())
+                                .font(TextStyle::new(24.0, 900.0).italic())
+                                .color(p.text),
+                        )
+                        .child(
+                            text(tr("onboarding.setupCoreSubtitle"))
+                                .font(micro(14.0, 400.0, 0.0))
+                                .color(p.muted),
+                        )
+                        .child(
+                            text(tr("onboarding.binariesDescription"))
+                                .font(micro(12.0, 400.0, 0.0))
+                                .color(p.muted)
+                                .wrap(),
+                        )
+                        .child(solid_button(
+                            p,
+                            tr("onboarding.downloadCoreBinaries"),
+                            p.primary,
+                            p.on_primary,
+                            10.0,
+                            |s: &mut Ui| s.download_scrcpy(),
+                        ))
+                        .child(
+                            text(tr("onboarding.manualSetupFallback"))
+                                .font(micro(11.0, 400.0, 0.0))
+                                .color(p.subtle)
+                                .wrap(),
+                        )
+                        .child(row().center().gap(12.0).child(solid_button(
+                            p,
+                            tr("onboarding.continueToApp"),
+                            p.input,
+                            p.subtle,
+                            10.0,
+                            |s: &mut Ui| s.onboarding_open = false,
+                        ))),
+                ),
+        )
+}
+
+fn update_modal<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    info: &crate::ui::state::UpdateInfo,
+    tr: &F,
+) -> El {
+    let message = tv(
+        &s.locale,
+        "alerts.updateAvailableMessage",
+        &[("local", &info.local), ("latest", &info.latest)],
+    );
+    col()
+        .key("update-modal")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .center()
+        .fill(hex("000000").alpha(0.6))
         .child(
             col()
-                .key("onboarding-card")
-                .w(520.0)
-                .gap(14.0)
-                .padding(24.0)
-                .fill(k.c.layer_01)
-                .radius(tok::radius::LG)
+                .key("update-panel")
+                .w(448.0)
+                .padding(32.0)
+                .gap(16.0)
+                .center()
+                .radius(24.0)
+                .fill(p.elevated)
+                .border(1.0, p.primary.alpha(0.3))
+                .child(el().h(2.0).w(200.0).fill(p.primary))
                 .child(
-                    text(tr("onboarding.title"))
-                        .font(type_::TITLE)
-                        .color(k.c.text_base),
+                    text(tr("alerts.updateAvailableTitle").to_uppercase())
+                        .font(TextStyle::new(20.0, 900.0).italic())
+                        .color(p.text),
                 )
                 .child(
-                    text(tr("onboarding.manual"))
-                        .font(type_::BODY)
-                        .color(k.c.text_muted)
-                        .wrap(),
-                )
-                .child(
-                    Button::new(tr("onboarding.download"))
-                        .variant(ButtonVariant::Submit)
-                        .disabled(s.download.active)
-                        .on_press(|s: &mut Ui| s.download_scrcpy())
-                        .build(k),
+                    text(message)
+                        .font(micro(14.0, 400.0, 0.0))
+                        .color(p.muted)
+                        .wrap()
+                        .center(),
                 )
                 .child(
                     row()
-                        .center_y()
-                        .gap(10.0)
-                        .child(
-                            Button::new(tr("onboarding.continue"))
-                                .variant(ButtonVariant::Contrast)
-                                .disabled(s.scrcpy_ok != Some(true))
-                                .on_press(|s: &mut Ui| s.onboarding_open = false)
-                                .build(k),
-                        )
-                        .child(
-                            Button::new(tr("common.close"))
-                                .variant(ButtonVariant::Ghost)
-                                .on_press(|s: &mut Ui| s.onboarding_open = false)
-                                .build(k),
-                        ),
+                        .gap(12.0)
+                        .child(solid_button(
+                            p,
+                            tr("alerts.cancelBtn"),
+                            p.input,
+                            p.muted,
+                            10.0,
+                            |s: &mut Ui| s.update = None,
+                        ))
+                        .child(solid_button(
+                            p,
+                            tr("alerts.updateBtn"),
+                            p.primary,
+                            p.on_primary,
+                            10.0,
+                            |s: &mut Ui| s.update_now(),
+                        )),
                 ),
         )
 }
 
-fn alert(k: &Kit, message: &str) -> El {
+fn alert_modal(_s: &Ui, p: &Palette, message: &str) -> El {
     col()
-        .key("alert-scrim")
+        .key("alert-modal")
         .absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .center()
-        .fill(k.c.black.alpha(0.62))
+        .fill(hex("000000").alpha(0.6))
         .child(
             col()
-                .key("alert-card")
+                .key("alert-panel")
                 .w(380.0)
-                .gap(12.0)
-                .padding(20.0)
-                .fill(k.c.layer_01)
-                .radius(tok::radius::LG)
-                .child(text(message).font(type_::BODY).color(k.c.text_base).wrap())
+                .padding(32.0)
+                .gap(16.0)
+                .center()
+                .radius(24.0)
+                .fill(p.elevated)
+                .border(1.0, p.primary.alpha(0.3))
                 .child(
-                    Button::new("OK")
-                        .variant(ButtonVariant::Contrast)
-                        .on_press(|s: &mut Ui| s.alert = None)
-                        .build(k),
+                    text(message)
+                        .font(micro(14.0, 400.0, 0.0))
+                        .color(p.muted)
+                        .wrap()
+                        .center(),
+                )
+                .child(solid_button(
+                    p,
+                    "OK",
+                    p.primary,
+                    p.on_primary,
+                    10.0,
+                    |s: &mut Ui| s.alert = None,
+                )),
+        )
+}
+
+fn section(p: &Palette, padding: f32, title: El, body: El) -> El {
+    col()
+        .key("section")
+        .gap(8.0)
+        .padding(padding)
+        .fill(p.glass)
+        .border(1.0, p.glass_border)
+        .radius(12.0)
+        .child(
+            col()
+                .gap(8.0)
+                .child(title)
+                .child(el().h(1.0).w_full().fill(p.border.alpha(0.5))),
+        )
+        .child(body)
+}
+
+fn section_label(p: &Palette, value: &str, accent: bool) -> El {
+    col()
+        .gap(6.0)
+        .child(
+            text(value.to_uppercase())
+                .font(micro(9.0, 900.0, 0.9))
+                .color(if accent {
+                    p.primary.alpha(0.6)
+                } else {
+                    p.muted
+                }),
+        )
+        .child(el().h(1.0).w_full().fill(p.border.alpha(0.5)))
+}
+
+fn tip_card(p: &Palette, text_value: &str) -> El {
+    col()
+        .gap(6.0)
+        .padding(12.0)
+        .radius(8.0)
+        .fill(p.primary.alpha(0.05))
+        .border(1.0, p.primary.alpha(0.2))
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(el().size(4.0, 4.0).radius(2.0).fill(p.primary))
+                .child(eyebrow(p, text_value, 9.0).color(p.primary)),
+        )
+}
+
+fn field(p: &Palette, label: &str, control: El) -> El {
+    col()
+        .gap(4.0)
+        .child(
+            text(label.to_uppercase())
+                .font(micro(9.0, 900.0, 0.2))
+                .color(p.subtle),
+        )
+        .child(control)
+}
+
+fn badge(_p: &Palette, label: &str, tint: Color) -> El {
+    text(label.to_uppercase())
+        .font(micro(8.0, 700.0, 0.4))
+        .color(tint)
+        .padding(3.0)
+        .radius(4.0)
+        .fill(tint.alpha(0.1))
+        .border(1.0, tint.alpha(0.25))
+}
+
+fn text_button(
+    _p: &Palette,
+    label: &str,
+    tint: Color,
+    size: f32,
+    f: impl Fn(&mut Ui) + 'static,
+) -> El {
+    text(label.to_uppercase())
+        .font(micro(size, 900.0, 0.5))
+        .color(tint)
+        .padding(4.0)
+        .radius(4.0)
+        .on_press(f)
+        .hover(tint.alpha(0.08))
+}
+
+fn ghost(p: &Palette, label: &str, size: f32, f: impl Fn(&mut Ui) + 'static) -> El {
+    text(label.to_uppercase())
+        .font(micro(size, 900.0, 0.4))
+        .color(p.subtle)
+        .padding(6.0)
+        .radius(6.0)
+        .border(1.0, p.border)
+        .on_press(f)
+        .hover(p.primary.alpha(0.08))
+}
+
+fn folder_button(
+    p: &Palette,
+    label: &str,
+    f: impl Fn(&mut Ui, std::path::PathBuf) + Clone + 'static,
+) -> El {
+    let title = label.to_string();
+    text(label.to_uppercase())
+        .font(micro(9.0, 900.0, 0.4))
+        .color(p.subtle)
+        .padding(6.0)
+        .radius(6.0)
+        .border(1.0, p.border)
+        .on_press_tx(move |_s: &mut Ui, tx: &mut rune::Tx| {
+            let opts = rune::FileDialogOptions {
+                title: title.clone(),
+                ..Default::default()
+            };
+            let choose = f.clone();
+            tx.open_folder(
+                opts,
+                move |s: &mut Ui, result: rune::file_dialog::FileDialogResult, _| {
+                    if let Ok(Some(path)) = result {
+                        choose(s, path);
+                    }
+                },
+            );
+        })
+}
+
+fn segment(p: &Palette, label: &str, active: bool, f: impl Fn(&mut Ui) + 'static) -> El {
+    row()
+        .grow(1.0)
+        .h(28.0)
+        .center()
+        .gap(8.0)
+        .radius(6.0)
+        .fill(if active {
+            p.primary
+        } else {
+            Color::TRANSPARENT
+        })
+        .on_press(f)
+        .child(
+            text(label.to_uppercase())
+                .font(micro(9.0, 900.0, 0.9))
+                .color(if active { p.on_primary } else { p.subtle }),
+        )
+}
+
+fn solid_button(
+    p: &Palette,
+    label: &str,
+    fill: Color,
+    ink: Color,
+    size: f32,
+    f: impl Fn(&mut Ui) + 'static,
+) -> El {
+    row()
+        .h(30.0)
+        .padding(12.0)
+        .center()
+        .radius(8.0)
+        .fill(fill)
+        .on_press(f)
+        .hover(fill.mix(p.text, 0.08))
+        .press(fill.mix(p.text, 0.16))
+        .child(
+            text(label.to_uppercase())
+                .font(micro(size, 900.0, 1.0))
+                .color(ink),
+        )
+}
+
+fn checkbox(p: &Palette, label: &str, checked: bool, f: impl Fn(&mut Ui) + 'static) -> El {
+    row()
+        .gap(8.0)
+        .center_y()
+        .on_press(f)
+        .child(
+            el().size(14.0, 14.0)
+                .radius(4.0)
+                .fill(if checked {
+                    p.primary
+                } else {
+                    Color::TRANSPARENT
+                })
+                .border(1.0, if checked { p.primary } else { p.border_subtle })
+                .child(if checked {
+                    el().size(6.0, 6.0)
+                        .radius(1.0)
+                        .center()
+                        .self_center()
+                        .fill(p.bg)
+                } else {
+                    el().size(0.0, 0.0)
+                }),
+        )
+        .child(
+            text(label.to_uppercase())
+                .font(micro(10.0, 700.0, 0.4))
+                .color(if checked { p.text } else { p.muted }),
+        )
+}
+
+fn toggle_row(
+    p: &Palette,
+    label: &str,
+    on: bool,
+    danger: bool,
+    f: impl Fn(&mut Ui) + 'static,
+) -> El {
+    let tint = if danger { p.danger } else { p.primary };
+    row()
+        .h(26.0)
+        .gap(8.0)
+        .padding(8.0)
+        .center_y()
+        .radius(8.0)
+        .border(1.0, Color::TRANSPARENT)
+        .on_press(f)
+        .child(
+            row()
+                .size(20.0, 20.0)
+                .radius(6.0)
+                .center()
+                .fill(if on {
+                    tint.alpha(0.1)
+                } else {
+                    p.input.alpha(0.5)
+                })
+                .child(text("◆").font(micro(12.0, 400.0, 0.0)).color(if on {
+                    tint
+                } else {
+                    p.subtle
+                })),
+        )
+        .child(
+            text(label.to_uppercase())
+                .font(micro(10.0, 700.0, -0.2))
+                .truncate()
+                .color(if on { p.text } else { p.muted })
+                .grow(1.0),
+        )
+        .child(
+            el().key(format!("switch-{label}"))
+                .size(24.0, 14.0)
+                .radius(7.0)
+                .fill(if on { tint } else { p.input })
+                .padding(2.0)
+                .child(
+                    el().size(10.0, 10.0)
+                        .radius(5.0)
+                        .absolute(if on { 12.0 } else { 2.0 }, 2.0)
+                        .fill(if on { p.on_primary } else { Color::WHITE }),
                 ),
         )
 }
 
-fn section(k: &Kit, title: &str, body: El) -> El {
+fn bitrate<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
+    slider_row(
+        p,
+        tr("controlPanel.bitrate"),
+        &format!("{}M", s.config.bitrate.unwrap_or(8)),
+        s.config.bitrate.unwrap_or(8) as f32 / 50.0,
+        "bitrate",
+        s,
+    )
+}
+
+fn slider_row(
+    p: &Palette,
+    label: &str,
+    value: &str,
+    fraction: f32,
+    field: &'static str,
+    _s: &Ui,
+) -> El {
     col()
+        .key(format!("slider-{field}"))
         .gap(6.0)
         .child(
-            text(title)
-                .font(type_::SECTION)
-                .color(k.c.text_muted)
-                .pl(4.0),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(label.to_uppercase())
+                        .font(micro(9.0, 900.0, 0.9))
+                        .color(p.subtle)
+                        .grow(1.0),
+                )
+                .child(text(value).font(micro(10.0, 900.0, 0.0)).color(p.primary)),
         )
         .child(
-            body.fill(k.c.layer_01)
-                .radius(tok::radius::LG)
-                .padding(10.0),
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    el().key(format!("slider-track-{field}"))
+                        .grow(1.0)
+                        .h(4.0)
+                        .radius(2.0)
+                        .fill(p.input)
+                        .child(
+                            el().w_frac(fraction.clamp(0.0, 1.0))
+                                .h(4.0)
+                                .radius(2.0)
+                                .fill(p.primary),
+                        ),
+                )
+                .child(
+                    text("-")
+                        .font(micro(10.0, 700.0, 0.0))
+                        .color(p.subtle)
+                        .on_press(move |s: &mut Ui| step_config(s, field, -1)),
+                )
+                .child(
+                    text("+")
+                        .font(micro(10.0, 700.0, 0.0))
+                        .color(p.subtle)
+                        .on_press(move |s: &mut Ui| step_config(s, field, 1)),
+                ),
         )
 }
 
-fn switch<F: Fn(&mut Ui) + 'static>(k: &Kit, label: &str, on: bool, f: F) -> El {
-    Switch::new(on).label(label).on_toggle(f).build(k)
-}
-
-fn toggle_row(k: &Kit, label: &str, on: bool, f: impl Fn(&mut Ui) + 'static) -> El {
-    row()
-        .h(32.0)
-        .px(4.0)
-        .center_y()
-        .gap(8.0)
-        .label(label)
-        .child(text(label).font(type_::BODY).color(k.c.text_base).grow(1.0))
-        .child(Switch::new(on).label(label).on_toggle(f).build(k))
-}
-
-fn shortcut_chip(k: &Kit, key: &str, label: &str) -> El {
-    col()
-        .key(key)
-        .w(64.0)
-        .h(44.0)
-        .center()
-        .gap(2.0)
-        .fill(k.c.layer_02)
-        .radius(tok::radius::SM)
-        .child(text(key).font(type_::LABEL).color(k.c.text_base))
-        .child(text(label).font(type_::MONO_CAPTION).color(k.c.text_faint))
-}
-
-fn stepper<F: Fn(&str) -> &'static str>(
-    k: &Kit,
-    label: &str,
-    value: u32,
-    field: &'static str,
-    min: u32,
-    max: u32,
-    step: u32,
-    _tr: &F,
-) -> El {
+fn input(p: &Palette, k: &Kit, edit: &rune::TextEdit, placeholder: &str, label: &str) -> El {
+    let field = label.to_string();
     row()
         .h(30.0)
-        .gap(4.0)
-        .center_y()
-        .key(format!("step-{field}"))
+        .grow(1.0)
+        .min_w(0.0)
+        .padding(8.0)
+        .radius(8.0)
+        .fill(p.elevated.alpha(0.4))
+        .border(1.0, p.border)
         .child(
-            text(label)
-                .font(type_::BODY)
-                .color(k.c.text_muted)
-                .grow(1.0),
-        )
-        .child(
-            Button::new("-")
-                .variant(ButtonVariant::Ghost)
-                .on_press(move |s: &mut Ui| step_config(s, field, -(step as i64)))
+            TextInput::new(edit)
+                .plain()
+                .label(label)
+                .placeholder(placeholder)
+                .width(None)
+                .on_edit(move |s: &mut Ui| match field.as_str() {
+                    "IP" => &mut s.ip,
+                    "Pair IP" => &mut s.pair_ip,
+                    _ => &mut s.pair_code,
+                })
                 .build(k),
-        )
-        .child(
-            text(format!("{}", value))
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_base),
-        )
-        .child(
-            Button::new("+")
-                .variant(ButtonVariant::Ghost)
-                .on_press(move |s: &mut Ui| step_config(s, field, step as i64))
-                .build(k),
-        )
-        .child(
-            text(format!("{}-{}", min, max))
-                .font(type_::MONO_CAPTION)
-                .color(k.c.text_faint),
         )
 }
 
 fn select(
     s: &Ui,
+    _p: &Palette,
     k: &Kit,
     layer: &mut Vec<El>,
     key: &'static str,
@@ -1341,6 +2102,7 @@ fn select(
         .width(110.0)
         .current(Some(current))
         .label(label)
+        .appearance(SelectAppearance::Field)
         .open(s.open_select.as_deref() == Some(key))
         .on_toggle(move |s: &mut Ui| toggle_select(s, key))
         .on_close(|s: &mut Ui| s.open_select = None)
@@ -1360,9 +2122,9 @@ fn flip(field: &mut Option<bool>, fallback: bool) {
     *field = Some(!field.unwrap_or(fallback));
 }
 
-fn step_config(s: &mut Ui, field: &str, delta: i64) {
+fn step_config(s: &mut Ui, field: &str, delta: i32) {
     let clamp = |v: u32, min: u32, max: u32| -> u32 {
-        (v as i64 + delta).clamp(min as i64, max as i64) as u32
+        (v as i32 + delta).clamp(min as i32, max as i32) as u32
     };
     match field {
         "bitrate" => s.config.bitrate = Some(clamp(s.config.bitrate.unwrap_or(8), 1, 50)),
@@ -1371,19 +2133,9 @@ fn step_config(s: &mut Ui, field: &str, delta: i64) {
                 clamp((s.config.camera_zoom.unwrap_or(1.0) * 10.0) as u32, 10, 50) as f32 / 10.0,
             )
         }
-        "vdWidth" => {
-            let w = clamp(s.config.vd_width.unwrap_or(1920), 480, 3840);
-            s.config.vd_width = Some(w);
-            if s.config.flex_display.unwrap_or(false) {
-                s.config.vd_height = Some(((w * 9) / 16).clamp(360, 2160));
-            }
-        }
+        "vdWidth" => s.config.vd_width = Some(clamp(s.config.vd_width.unwrap_or(1920), 480, 3840)),
         "vdHeight" => {
-            let h = clamp(s.config.vd_height.unwrap_or(1080), 360, 2160);
-            s.config.vd_height = Some(h);
-            if s.config.flex_display.unwrap_or(false) {
-                s.config.vd_width = Some(((h * 16) / 9).clamp(480, 3840));
-            }
+            s.config.vd_height = Some(clamp(s.config.vd_height.unwrap_or(1080), 360, 2160))
         }
         "vdDpi" => s.config.vd_dpi = Some(clamp(s.config.vd_dpi.unwrap_or(420), 120, 640)),
         _ => {}
