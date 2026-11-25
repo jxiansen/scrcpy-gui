@@ -283,5 +283,14 @@
   "logs.pushingFile": "[SYSTEM] Envoi du fichier vers {device} : {filePath}...",
   "logs.installingApk": "[SYSTEM] Installation de l'APK sur {device} : {filePath}...",
   "logs.adbPrefix": "[ADB] {message}",
-  "logs.commandFailed": "[ERROR] La commande a échoué : {error}"
+  "logs.commandFailed": "[ERROR] La commande a échoué : {error}",
+  "ui.ipAddress": "IP Address",
+  "ui.pairingCode": "Pairing Code",
+  "ui.noRecords": "No records yet",
+  "ui.noDevice": "No device selected",
+  "ui.endAdb": "End ADB",
+  "ui.confirmEndAdb": "End ADB?",
+  "ui.end": "End",
+  "ui.useAddress": "Click to use this address",
+  "footer.createdBy": "Created with love by KB"
 }

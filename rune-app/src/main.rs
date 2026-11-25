@@ -55,6 +55,11 @@ fn scene_carbon(s: &mut Ui) {
     s.apply_fixture_theme(false, SessionKind::Mirror, "carbon");
 }
 
+fn scene_en(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Mirror);
+    s.set_locale("en");
+}
+
 fn setup(ui: &mut Ui, waker: Waker) {
     ui.setup(waker);
 }
@@ -76,6 +81,7 @@ fn main() {
             ("compare-emerald", scene_emerald),
             ("compare-astro", scene_astro),
             ("compare-carbon", scene_carbon),
+            ("compare-en", scene_en),
         ],
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)
     };

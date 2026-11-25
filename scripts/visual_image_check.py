@@ -27,6 +27,7 @@ OUT = ROOT / "tests" / "visual" / "out"
 SCENES = [
     "compare-dark", "compare-light", "compare-camera", "compare-desktop",
     "compare-bloodmoon", "compare-emerald", "compare-astro", "compare-carbon",
+    "compare-en",
 ]
 
 

@@ -283,5 +283,14 @@
   "logs.pushingFile": "[النظام] جارٍ إرسال الملف إلى {device}: {filePath}...",
   "logs.installingApk": "[النظام] جارٍ تثبيت ملف APK على {device}: {filePath}...",
   "logs.adbPrefix": "[ADB] {message}",
-  "logs.commandFailed": "[خطأ] فشل تنفيذ الأمر: {error}"
+  "logs.commandFailed": "[خطأ] فشل تنفيذ الأمر: {error}",
+  "ui.ipAddress": "IP Address",
+  "ui.pairingCode": "Pairing Code",
+  "ui.noRecords": "No records yet",
+  "ui.noDevice": "No device selected",
+  "ui.endAdb": "End ADB",
+  "ui.confirmEndAdb": "End ADB?",
+  "ui.end": "End",
+  "ui.useAddress": "Click to use this address",
+  "footer.createdBy": "Created with love by KB"
 }

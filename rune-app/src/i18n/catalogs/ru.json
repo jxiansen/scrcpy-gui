@@ -283,5 +283,14 @@
   "logs.pushingFile": "[SYSTEM] Отправка файла на {device}: {filePath}...",
   "logs.installingApk": "[SYSTEM] Установка APK на {device}: {filePath}...",
   "logs.adbPrefix": "[ADB] {message}",
-  "logs.commandFailed": "[ERROR] Команда завершилась с ошибкой: {error}"
+  "logs.commandFailed": "[ERROR] Команда завершилась с ошибкой: {error}",
+  "ui.ipAddress": "IP Address",
+  "ui.pairingCode": "Pairing Code",
+  "ui.noRecords": "No records yet",
+  "ui.noDevice": "No device selected",
+  "ui.endAdb": "End ADB",
+  "ui.confirmEndAdb": "End ADB?",
+  "ui.end": "End",
+  "ui.useAddress": "Click to use this address",
+  "footer.createdBy": "Created with love by KB"
 }

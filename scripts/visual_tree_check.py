@@ -130,6 +130,15 @@ def main() -> int:
     ]
     check("no untranslated/raw-key text", leaked, [])
 
+    if scene == "compare-en":
+        cjk = [
+            e.get("text")
+            for e in elements
+            if isinstance(e.get("text"), str)
+            and any("\u4e00" <= ch <= "\u9fff" for ch in e["text"])
+        ]
+        check("English scene has no Chinese text", cjk, [])
+
     diamonds = [e.get("text") for e in elements if e.get("text") == "◆"]
     check("no missing-glyph diamonds in shortcut grid", diamonds, [])
     targets = [e for e in elements if e.get("text") == "706fc5a1 · USB"]

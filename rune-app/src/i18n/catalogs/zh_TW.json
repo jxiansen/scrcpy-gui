@@ -283,5 +283,14 @@
   "logs.pushingFile": "[系統] 正在將檔案傳送至 {device}：{filePath}...",
   "logs.installingApk": "[系統] 正在 {device} 安裝 APK：{filePath}...",
   "logs.adbPrefix": "[ADB] {message}",
-  "logs.commandFailed": "[錯誤] 指令失敗：{error}"
+  "logs.commandFailed": "[錯誤] 指令失敗：{error}",
+  "ui.ipAddress": "IP 位址",
+  "ui.pairingCode": "配對碼",
+  "ui.noRecords": "尚無記錄",
+  "ui.noDevice": "未選擇裝置",
+  "ui.endAdb": "結束 ADB",
+  "ui.confirmEndAdb": "確認結束 ADB?",
+  "ui.end": "結束",
+  "ui.useAddress": "點擊使用此位址",
+  "footer.createdBy": "由 KB 製作"
 }

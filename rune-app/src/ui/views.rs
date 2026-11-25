@@ -129,13 +129,15 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
         let theme = *id;
         let preview = Palette::new(theme, s.dark);
         let selected = s.theme == theme;
+        let name = tr(&format!("header.themes.{theme}"));
         let mut dot = el()
             .key(format!("swatch-{theme}"))
+            .label(name)
             .size(16.0, 16.0)
             .radius(8.0)
             .fill(preview.primary)
             .border(1.0, p.border_subtle)
-            .help(tr(&format!("header.themes.{theme}")))
+            .help(name)
             .on_press(move |s: &mut Ui| s.set_theme(theme));
         if selected {
             dot = dot.outline(2.0, 2.0, p.text);
@@ -496,14 +498,21 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
             |s: &mut Ui| s.set_transport(Transport::Wifi),
         ));
 
-    let ip_input = input(p, k, &s.ip, tr("sidebar.ipPlaceholder"), "IP", "IP 地址");
+    let ip_input = input(
+        p,
+        k,
+        &s.ip,
+        tr("sidebar.ipPlaceholder"),
+        "IP",
+        tr("ui.ipAddress"),
+    );
     let pair_ip = input(
         p,
         k,
         &s.pair_ip,
         tr("sidebar.ipPlaceholder"),
         "Pair IP",
-        "IP 地址",
+        tr("ui.ipAddress"),
     );
     let pair_code = input(
         p,
@@ -511,7 +520,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         &s.pair_code,
         tr("sidebar.pairingCodePlaceholder"),
         "Pairing code",
-        "配对码",
+        tr("ui.pairingCode"),
     );
     let pair_button = solid_button(
         p,
@@ -544,7 +553,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                 .radius(8.0)
                 .fill(p.input.alpha(0.2))
                 .border(1.0, p.border.alpha(0.5))
-                .help("点击填入地址")
+                .help(tr("ui.useAddress"))
                 .on_press(move |s: &mut Ui| s.ip.replace_text(address.clone()))
                 .hover(p.primary.alpha(0.06))
                 .press(p.primary.alpha(0.12))
@@ -562,7 +571,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
     let mut recent = col().key("recent").gap(4.0);
     if s.history.is_empty() {
         recent = recent.child(
-            text("暂无记录")
+            text(tr("ui.noRecords"))
                 .font(micro(10.0, 400.0, 0.0))
                 .color(p.subtle),
         );
@@ -632,9 +641,9 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                     .fill(p.elevated)
                     .child(
                         text(if s.confirm_kill_adb {
-                            "确认结束 ADB?"
+                            tr("ui.confirmEndAdb")
                         } else {
-                            "结束 ADB"
+                            tr("ui.endAdb")
                         })
                         .font(micro(10.0, 500.0, 0.0))
                         .color(if s.confirm_kill_adb {
@@ -647,9 +656,9 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                     .child(text_button(
                         p,
                         if s.confirm_kill_adb {
-                            "确认"
+                            tr("common.confirm")
                         } else {
-                            "结束"
+                            tr("ui.end")
                         },
                         if s.confirm_kill_adb {
                             p.danger
@@ -659,9 +668,13 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                         9.0,
                         |s: &mut Ui| s.confirm_kill_adb(),
                     ))
-                    .child(text_button(p, "取消", p.subtle, 9.0, |s: &mut Ui| {
-                        s.toggle_adb_menu()
-                    }))
+                    .child(text_button(
+                        p,
+                        tr("common.cancel"),
+                        p.subtle,
+                        9.0,
+                        |s: &mut Ui| s.toggle_adb_menu(),
+                    ))
             } else {
                 el().size(0.0, 0.0)
             })
@@ -867,7 +880,11 @@ fn center<F: Fn(&str) -> &'static str>(
                 } else {
                     Color::TRANSPARENT
                 })
-                .on_press(move |s: &mut Ui| s.tab = mode)
+                .on_press_tx(move |s: &mut Ui, tx: &mut rune::Tx| {
+                    // Avoid spring-driven text rasterisation (blur + shift) on tab change.
+                    s.tab = mode;
+                    tx.instant();
+                })
                 .child(icon(ico, 14.0).color(if active { p.on_primary } else { p.muted }))
                 .child(
                     text(label.to_uppercase())
@@ -904,7 +921,7 @@ fn center<F: Fn(&str) -> &'static str>(
     };
     let target_line = row().key("session-target").gap(8.0).center_y().child(
         text(if s.config.device.is_empty() {
-            "未选择设备".to_string()
+            tr("ui.noDevice").to_string()
         } else {
             format!("{} · {}", s.config.device, transport)
         })
@@ -1713,7 +1730,11 @@ fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
                 let _ = tx.open_url(&target);
             })
     };
-    let version = format!("v{} · 由 KB 制作", env!("CARGO_PKG_VERSION"));
+    let version = format!(
+        "v{} · {}",
+        env!("CARGO_PKG_VERSION"),
+        tr("footer.createdBy")
+    );
     let meta = format!(
         "{}: SCRCPY  {}: RUNE  {}: RUST",
         tr("footer.core").to_uppercase(),
@@ -2024,6 +2045,8 @@ fn tip_card(p: &Palette, text_value: &str) -> El {
 
 fn field(p: &Palette, label: &str, control: El) -> El {
     col()
+        .grow(1.0)
+        .min_w(0.0)
         .gap(4.0)
         .child(
             text(label.to_uppercase())
@@ -2401,6 +2424,8 @@ fn select(
         .on_close(|s: &mut Ui| s.open_select = None)
         .on_choose(move |s: &mut Ui, v: &str, _| apply_choice(s, key, v))
         .build(k, layer)
+        .grow(1.0)
+        .min_w(0.0)
 }
 
 fn toggle_select(s: &mut Ui, key: &str) {
