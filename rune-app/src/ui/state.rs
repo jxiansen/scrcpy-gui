@@ -121,7 +121,7 @@ pub struct Ui {
     pub config: ScrcpyConfig,
     pub devices: Vec<Device>,
     pub mdns: Vec<MdnsService>,
-    pub logs: Vec<String>,
+    pub logs: Vec<(String, String)>,
     pub running: BTreeMap<String, bool>,
     pub history: Vec<String>,
     pub tab: SessionKind,
@@ -192,6 +192,7 @@ impl Default for Ui {
         let state: SharedState = Arc::new(crate::backend::ScrcpyState::default());
         let prefs = Prefs::open(PREFS_ID);
         let config: ScrcpyConfig = prefs.get("config").unwrap_or_else(default_config);
+        let bg_color = config.background_color.clone().unwrap_or_default();
         let dark = prefs.get("dark").unwrap_or(true);
         let locale: String = prefs.get("locale").unwrap_or_else(|| "zh-CN".into());
         let theme: String = prefs.get("theme").unwrap_or_else(|| "ultraviolet".into());
@@ -217,7 +218,7 @@ impl Default for Ui {
             pair_ip: TextEdit::new(""),
             pair_code: TextEdit::new(""),
             command: TextEdit::new(""),
-            background_color: TextEdit::new(""),
+            background_color: TextEdit::new(bg_color),
             open_select: None,
             alert: None,
             update: None,
@@ -276,11 +277,12 @@ impl Ui {
             address: "172.16.1.145:38517".into(),
         }];
         self.logs = vec![
-            "[SYSTEM] ScrcpyGUI ready".into(),
-            "[SYSTEM] Device: PJA110".into(),
+            ("12:34:56".into(), "[SYSTEM] ScrcpyGUI ready".into()),
+            ("12:34:56".into(), "[SYSTEM] Device: PJA110".into()),
         ];
         self.ip.replace_text("192.168.x.x:5555");
         self.pair_ip.replace_text("192.168.x.x:55");
+        self.background_color.replace_text("");
     }
 
     pub fn setup(&mut self, waker: Waker) {
@@ -404,17 +406,30 @@ impl Ui {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .into();
-                self.check_scrcpy();
-                self.refresh_devices();
+                if self.download.success {
+                    self.check_scrcpy();
+                    self.refresh_devices();
+                } else {
+                    self.log(format!("[SYSTEM] {}", self.download.message));
+                }
             }
             _ => {}
         }
     }
 
     pub fn log(&mut self, text: String) {
-        for line in text.split('\n') {
-            if !line.trim().is_empty() {
-                self.logs.push(line.to_string());
+        if self.fixture {
+            for line in text.split('\n') {
+                if !line.trim().is_empty() {
+                    self.logs.push(("12:34:56".into(), line.to_string()));
+                }
+            }
+        } else {
+            let stamp = chrono::Local::now().format("%H:%M:%S").to_string();
+            for line in text.split('\n') {
+                if !line.trim().is_empty() {
+                    self.logs.push((stamp.clone(), line.to_string()));
+                }
             }
         }
         if self.logs.len() > 100 {
@@ -739,7 +754,6 @@ impl Ui {
             return;
         }
         self.config.session_mode = self.tab.as_str().into();
-        self.running.insert(self.config.device.clone(), true);
         self.save_config();
         self.log(tv(
             &self.locale,
@@ -754,8 +768,7 @@ impl Ui {
         });
     }
 
-    pub fn stop_session(&mut self, device: &str) {
-        self.running.insert(device.to_string(), false);
+    pub fn stop_session(&self, device: &str) {
         let state = self.state.clone();
         let device = device.to_string();
         self.runtime.spawn(async move {
@@ -763,10 +776,27 @@ impl Ui {
         });
     }
 
-    pub fn download_scrcpy(&self) {
+    pub fn download_scrcpy(&mut self) {
+        if self.download.active {
+            return;
+        }
+        self.download.active = true;
+        // Download always extracts to the default exe-adjacent folder; a stale
+        // custom path would make the freshly installed binary invisible.
+        self.config.scrcpy_path = None;
+        self.save_config();
         let sink = self.sink.clone();
         self.runtime.spawn(async move {
-            let _ = commands::download_scrcpy(sink).await;
+            if let Err(e) = commands::download_scrcpy(sink.clone()).await {
+                sink.emit(
+                    "scrcpy-status",
+                    serde_json::json!({
+                        "type": "download-complete",
+                        "success": false,
+                        "message": e,
+                    }),
+                );
+            }
         });
     }
 
@@ -885,7 +915,11 @@ impl Ui {
                 "scrcpy_locale": self.locale,
                 "scrcpy_history": serde_json::to_string(&self.history).unwrap_or_default(),
             },
-            "logs": self.logs,
+            "logs": self
+                .logs
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect::<Vec<_>>(),
         });
         let name = format!(
             "scrcpy-gui-logs-{}.json",

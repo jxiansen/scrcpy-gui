@@ -95,7 +95,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .opacity(0.12)
                 .a11y_hidden(),
         )
-        .child(header(s, &p, &k, &tr))
+        .child(header(s, &p, &k, &mut layer, &tr))
         .child(
             row()
                 .key("workspace")
@@ -123,7 +123,13 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     rune_kit::root(root, layer)
 }
 
-fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> El {
+fn header<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
     let mut swatches = row().key("swatches").gap(8.0).center_y();
     for id in THEMES.iter() {
         let theme = *id;
@@ -207,7 +213,7 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
                 .unwrap_or(0);
             s.set_locale(LOCALES[idx]);
         })
-        .build(k, &mut Vec::new());
+        .build(k, layer);
 
     let dot = match s.scrcpy_ok {
         Some(true) => p.success,
@@ -541,7 +547,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
 
     let mut wifi_rows = col().key("wifi").gap(12.0);
     for service in &s.mdns {
-        if !service.service.contains("_adb-tls") {
+        let pairing = service.service.contains("_adb-tls-pairing");
+        if !pairing && !service.service.contains("_adb-tls-connect") {
             continue;
         }
         let address = service.address.clone();
@@ -554,7 +561,13 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                 .fill(p.input.alpha(0.2))
                 .border(1.0, p.border.alpha(0.5))
                 .help(tr("ui.useAddress"))
-                .on_press(move |s: &mut Ui| s.ip.replace_text(address.clone()))
+                .on_press(move |s: &mut Ui| {
+                    if pairing {
+                        s.pair_ip.replace_text(address.clone());
+                    } else {
+                        s.ip.replace_text(address.clone());
+                    }
+                })
                 .hover(p.primary.alpha(0.06))
                 .press(p.primary.alpha(0.12))
                 .child(
@@ -970,38 +983,52 @@ fn center<F: Fn(&str) -> &'static str>(
         .min_h(0.0)
         .gap(16.0)
         .child(capture)
-        .child(section(
-            "engine",
-            p,
-            10.0,
-            {
-                let mut head = row()
-                    .gap(8.0)
-                    .center_y()
+        .child(
+            section(
+                "engine",
+                p,
+                10.0,
+                {
+                    let mut head = row()
+                        .gap(8.0)
+                        .center_y()
+                        .child(
+                            text(tr("controlPanel.engineConfiguration").to_uppercase())
+                                .font(micro(11.0, 900.0, 1.1))
+                                .color(p.muted),
+                        )
+                        .child(row().grow(1.0));
+                    if running {
+                        head = head.child(badge(p, tr("controlPanel.active"), p.success));
+                    }
+                    let otg = s.config.otg_pure.unwrap_or(false)
+                        && (s.config.hid_keyboard.unwrap_or(false)
+                            || s.config.hid_mouse.unwrap_or(false));
+                    if otg {
+                        head = head.child(badge(p, tr("controlPanel.otgOnly"), p.danger));
+                    }
+                    head
+                },
+                col()
+                    .gap(6.0)
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .child(target_line)
                     .child(
-                        text(tr("controlPanel.engineConfiguration").to_uppercase())
-                            .font(micro(11.0, 900.0, 1.1))
-                            .color(p.muted),
-                    )
-                    .child(row().grow(1.0));
-                if running {
-                    head = head.child(badge(p, tr("controlPanel.active"), p.success));
-                }
-                let otg = s.config.otg_pure.unwrap_or(false)
-                    && (s.config.hid_keyboard.unwrap_or(false)
-                        || s.config.hid_mouse.unwrap_or(false));
-                if otg {
-                    head = head.child(badge(p, tr("controlPanel.otgOnly"), p.danger));
-                }
-                head
-            },
-            col().gap(6.0).child(target_line).child(config),
-        ))
+                        config
+                            .scroll(ScrollSpec {
+                                stick_bottom: false,
+                            })
+                            .min_h(0.0)
+                            .grow(1.0)
+                            .shrink(),
+                    ),
+            )
+            .grow(1.0)
+            .min_h(0.0),
+        )
         .child(action)
         .child(log_panel(s, p, tr))
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
 }
 
 fn mirror_config<F: Fn(&str) -> &'static str>(
@@ -1038,19 +1065,28 @@ fn mirror_config<F: Fn(&str) -> &'static str>(
                             p,
                             tr("controlPanel.hidKeyboard"),
                             s.config.hid_keyboard.unwrap_or(false),
-                            |s| flip(&mut s.config.hid_keyboard, false),
+                            |s| {
+                                flip(&mut s.config.hid_keyboard, false);
+                                s.save_config();
+                            },
                         ))
                         .child(checkbox(
                             p,
                             tr("controlPanel.hidMouse"),
                             s.config.hid_mouse.unwrap_or(false),
-                            |s| flip(&mut s.config.hid_mouse, false),
+                            |s| {
+                                flip(&mut s.config.hid_mouse, false);
+                                s.save_config();
+                            },
                         ))
                         .child(checkbox(
                             p,
                             tr("controlPanel.pureHid"),
                             s.config.otg_pure.unwrap_or(false),
-                            |s| flip(&mut s.config.otg_pure, false),
+                            |s| {
+                                flip(&mut s.config.otg_pure, false);
+                                s.save_config();
+                            },
                         )),
                 ),
         )
@@ -1113,6 +1149,7 @@ fn camera_config<F: Fn(&str) -> &'static str>(
                     LENSES,
                     s.config.camera_id.as_deref().unwrap_or("Auto Select"),
                     tr("controlPanel.cameraDevice"),
+                    200.0,
                 )),
         )
         .child(
@@ -1134,6 +1171,7 @@ fn camera_config<F: Fn(&str) -> &'static str>(
                     ASPECT,
                     s.config.camera_ar.as_deref().unwrap_or("0"),
                     tr("controlPanel.aspect"),
+                    120.0,
                 )),
         )
         .child(
@@ -1143,7 +1181,10 @@ fn camera_config<F: Fn(&str) -> &'static str>(
                     p,
                     tr("controlPanel.cameraTorch"),
                     s.config.camera_torch.unwrap_or(false),
-                    |s| flip(&mut s.config.camera_torch, false),
+                    |s| {
+                        flip(&mut s.config.camera_torch, false);
+                        s.save_config();
+                    },
                 ))
                 .child(slider_row(
                     p,
@@ -1239,6 +1280,7 @@ fn desktop_config<F: Fn(&str) -> &'static str>(
                                         s.config.vd_height.unwrap_or(0),
                                     ),
                                     tr("controlPanel.quickPresets"),
+                                    140.0,
                                 )),
                         ),
                 ),
@@ -1255,7 +1297,7 @@ fn desktop_config<F: Fn(&str) -> &'static str>(
                         .color(p.muted)
                         .grow(1.0),
                 )
-                .child(el().size(20.0, 20.0).radius(4.0).fill(hex(
+                .child(el().size(20.0, 20.0).radius(4.0).fill(safe_hex(
                     s.config.background_color.as_deref().unwrap_or("#000000"),
                 )))
                 .child(
@@ -1264,6 +1306,13 @@ fn desktop_config<F: Fn(&str) -> &'static str>(
                         .label("Background color")
                         .width(Some(100.0))
                         .on_edit(|s: &mut Ui| &mut s.background_color)
+                        .on_submit(|s: &mut Ui, _| {
+                            let value = s.background_color.text.clone();
+                            if valid_hex(&value) {
+                                s.config.background_color = Some(value);
+                                s.save_config();
+                            }
+                        })
                         .build(k),
                 )
                 .child(text_button(
@@ -1288,6 +1337,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
     with_res: bool,
     two_cols: bool,
 ) -> El {
+    let sel_w = if two_cols { 268.0 } else { 176.0 };
     let mut grid = row().key("perf").gap(8.0);
     if two_cols {
         grid = grid.w_full();
@@ -1311,6 +1361,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
                 RES,
                 s.config.res.as_deref().unwrap_or("0"),
                 tr("controlPanel.resolution"),
+                sel_w,
             ),
         ));
     }
@@ -1326,6 +1377,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
             FPS,
             &fps_current,
             tr("controlPanel.fps"),
+            sel_w,
         ),
     ));
     fields.push(field(
@@ -1340,6 +1392,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
             ROT,
             s.config.rotation.as_deref().unwrap_or("0"),
             tr("controlPanel.rotation"),
+            sel_w,
         ),
     ));
     fields.push(field(
@@ -1354,6 +1407,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
             CODEC,
             s.config.codec.as_deref().unwrap_or("h264"),
             tr("controlPanel.codec"),
+            sel_w,
         ),
     ));
     fields.push(field(
@@ -1368,6 +1422,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
             RENDERERS,
             s.config.render_driver.as_deref().unwrap_or("Auto"),
             tr("controlPanel.graphicsRenderer"),
+            sel_w,
         ),
     ));
     fields.push(field(
@@ -1382,6 +1437,7 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
             HWDEC,
             s.config.hwdec.as_deref().unwrap_or("auto"),
             tr("controlPanel.hardwareDecoding"),
+            sel_w,
         ),
     ));
 
@@ -1402,13 +1458,19 @@ fn perf_grid<F: Fn(&str) -> &'static str>(
                 p,
                 tr("controlPanel.vsync"),
                 s.config.vsync.unwrap_or(true),
-                |s| flip(&mut s.config.vsync, true),
+                |s| {
+                    flip(&mut s.config.vsync, true);
+                    s.save_config();
+                },
             ))
             .child(checkbox(
                 p,
                 tr("controlPanel.ignoreEncoderConstraints"),
                 s.config.ignore_video_encoder_constraints.unwrap_or(false),
-                |s| flip(&mut s.config.ignore_video_encoder_constraints, false),
+                |s| {
+                    flip(&mut s.config.ignore_video_encoder_constraints, false);
+                    s.save_config();
+                },
             )),
     )
 }
@@ -1425,37 +1487,58 @@ fn right<F: Fn(&str) -> &'static str>(
         (
             "sessionBehavior.stayAwake",
             s.config.stay_awake.unwrap_or(false),
-            |s| flip(&mut s.config.stay_awake, false),
+            |s| {
+                flip(&mut s.config.stay_awake, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.keepActive",
             s.config.keep_active.unwrap_or(false),
-            |s| flip(&mut s.config.keep_active, false),
+            |s| {
+                flip(&mut s.config.keep_active, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.screenOff",
             s.config.turn_off.unwrap_or(false),
-            |s| flip(&mut s.config.turn_off, false),
+            |s| {
+                flip(&mut s.config.turn_off, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.forwardAudio",
             s.config.audio_enabled.unwrap_or(true),
-            |s| flip(&mut s.config.audio_enabled, true),
+            |s| {
+                flip(&mut s.config.audio_enabled, true);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.alwaysOnTop",
             s.config.always_on_top.unwrap_or(false),
-            |s| flip(&mut s.config.always_on_top, false),
+            |s| {
+                flip(&mut s.config.always_on_top, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.fullScreen",
             s.config.fullscreen.unwrap_or(false),
-            |s| flip(&mut s.config.fullscreen, false),
+            |s| {
+                flip(&mut s.config.fullscreen, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.borderless",
             s.config.borderless.unwrap_or(false),
-            |s| flip(&mut s.config.borderless, false),
+            |s| {
+                flip(&mut s.config.borderless, false);
+                s.save_config();
+            },
         ),
         (
             "sessionBehavior.rememberWindowPosition",
@@ -1465,7 +1548,10 @@ fn right<F: Fn(&str) -> &'static str>(
         (
             "sessionBehavior.recordFeed",
             s.config.record.unwrap_or(false),
-            |s| flip(&mut s.config.record, false),
+            |s| {
+                flip(&mut s.config.record, false);
+                s.save_config();
+            },
         ),
     ];
     for (key, on, handler) in rows {
@@ -1491,6 +1577,7 @@ fn right<F: Fn(&str) -> &'static str>(
                 AUDIO_CODEC,
                 s.config.audio_codec.as_deref().unwrap_or("auto"),
                 tr("sessionBehavior.audioCodec"),
+                140.0,
             )),
     );
 
@@ -1624,21 +1711,13 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                 .color(hex("a1a1aa")),
         );
     }
-    for (i, line) in s.logs.iter().enumerate() {
+    for (i, (time, line)) in s.logs.iter().enumerate() {
         lines = lines.child(
             row()
                 .key(format!("log-{i}"))
                 .gap(12.0)
                 .pl(12.0)
-                .child(
-                    text(if s.fixture {
-                        "12:34:56".to_string()
-                    } else {
-                        chrono::Local::now().format("%H:%M:%S").to_string()
-                    })
-                    .font(mono(11.0))
-                    .color(hex("a1a1aa")),
-                )
+                .child(text(time.clone()).font(mono(11.0)).color(hex("a1a1aa")))
                 .child(
                     text(line.clone())
                         .font(mono(11.0))
@@ -2295,6 +2374,8 @@ fn slider_row(
 ) -> El {
     col()
         .key(format!("slider-{field}"))
+        .grow(1.0)
+        .min_w(180.0)
         .gap(6.0)
         .child(
             row()
@@ -2336,6 +2417,18 @@ fn slider_row(
                 .child(step_button(p, "-", field, -1))
                 .child(step_button(p, "+", field, 1)),
         )
+}
+
+fn valid_hex(value: &str) -> bool {
+    value.len() == 7 && value.starts_with('#') && value[1..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn safe_hex(value: &str) -> Color {
+    if valid_hex(value) {
+        hex(value)
+    } else {
+        hex("#000000")
+    }
 }
 
 fn preset_name(w: u32, h: u32) -> &'static str {
@@ -2413,9 +2506,10 @@ fn select(
     options: &[&str],
     current: &str,
     label: &str,
+    width: f32,
 ) -> El {
     Select::new(key, options)
-        .width(110.0)
+        .width(width)
         .current(Some(current))
         .label(label)
         .appearance(SelectAppearance::Field)

@@ -70,6 +70,7 @@ fn poll(ui: &mut Ui, _dt: f64, _tx: &mut Tx) -> bool {
 
 fn main() {
     let spec = AppSpec::<Ui> {
+        min_size: Some((1080.0, 760.0)),
         setup: Some(setup),
         poll: Some(poll),
         scenes: &[

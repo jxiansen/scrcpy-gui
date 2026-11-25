@@ -27,8 +27,8 @@ EXPECTED_RECTS = {
     "kit-root/window/workspace/sidebar": [24, 72, 270, 722],
     "kit-root/window/workspace/center": [318, 72, 564, 722],
     "kit-root/window/workspace/right": [906, 72, 270, 722],
-    "kit-root/window/workspace/center/console": [318, 628, 564, 220],
-    "kit-root/window/workspace/center/start-stop": [318, 560, 564, 52],
+    "kit-root/window/workspace/center/console": [318, 574, 564, 220],
+    "kit-root/window/workspace/center/start-stop": [318, 506, 564, 52],
 }
 
 EXPECTED_FILLS = {
