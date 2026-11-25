@@ -1,25 +1,24 @@
 [workspace]
 resolver = "3"
 members = ["rune-app"]
-exclude = ["src-tauri"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
 
 # Rune ships patched forks of these crates. Cargo does not inherit [patch] from a
 # dependency, so an app building Rune must repeat them at its own workspace root.
 [patch.crates-io]
-winit = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-naga = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
-accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "80cfdbc1a31d8f088d44cb1e4fa36cbbae01e047" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "ecbe830bd0e7662548a0d0f8dc4c525f17703ace" }
