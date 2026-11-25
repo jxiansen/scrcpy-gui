@@ -25,6 +25,7 @@
   "header.colorModes.light": "Claro",
   "header.colorModes.dark": "Escuro",
   "header.colorModes.system": "Sistema",
+  "header.panelOnTopTooltip": "Manter a janela do ScrcpyGUI sempre visível",
   "header.languageLabel": "Idioma",
   "header.tagline": "Espelhar & Controlar Android // Dispositivos com Facilidade",
   "header.scrcpyEngine": "Motor Scrcpy",

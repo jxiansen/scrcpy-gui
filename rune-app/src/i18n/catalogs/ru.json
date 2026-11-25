@@ -25,6 +25,7 @@
   "header.colorModes.light": "Светлая",
   "header.colorModes.dark": "Тёмная",
   "header.colorModes.system": "Системная",
+  "header.panelOnTopTooltip": "Держать окно ScrcpyGUI поверх других",
   "header.languageLabel": "Язык",
   "header.tagline": "Трансляция и управление Android-устройствами без лишних сложностей",
   "header.scrcpyEngine": "Движок scrcpy",

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rune::prefs::Prefs;
-use rune::{TextEdit, Waker};
+use rune::{Taskbar, TaskbarProgress, TextEdit, Waker};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -82,6 +82,25 @@ pub struct Download {
     pub success: bool,
 }
 
+/// One `rune_kit::Toast`'s copy; `None` in `Ui::toast` hides the region.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToastNote {
+    pub title: String,
+    pub description: String,
+}
+
+/// The GUI window's saved place, in physical desktop pixels (the space
+/// `WindowOptions::position` / `physical_size` take). `scale` converts the
+/// content size back to logical points for `WindowHandle::resize`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct SavedWindow {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub scale: f32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct MdnsService {
     pub name: String,
@@ -137,6 +156,8 @@ pub struct Ui {
     pub alert: Option<String>,
     pub update: Option<UpdateInfo>,
     pub onboarding_open: bool,
+    pub toast: Option<ToastNote>,
+    toast_seq: u64,
     pub is_refreshing: bool,
     pub connecting: bool,
     pub pairing: bool,
@@ -146,6 +167,14 @@ pub struct Ui {
     friendly_names: Arc<Mutex<HashMap<String, String>>>,
     last_device_sig: Arc<Mutex<String>>,
     pub dark: bool,
+    /// `light`, `dark` or `system`; `dark` keeps the last resolved value for code
+    /// that reads the legacy pref.
+    pub color_mode: String,
+    /// The GUI window's always-on-top state (not scrcpy's `config.always_on_top`).
+    pub panel_on_top: bool,
+    /// The saved GUI window place; `None` on first launch.
+    window_placement: Option<SavedWindow>,
+    last_taskbar: Option<Taskbar>,
     pub accent: usize,
     pub theme: String,
     pub locale: String,
@@ -194,6 +223,11 @@ impl Default for Ui {
         let config: ScrcpyConfig = prefs.get("config").unwrap_or_else(default_config);
         let bg_color = config.background_color.clone().unwrap_or_default();
         let dark = prefs.get("dark").unwrap_or(true);
+        let color_mode: String = prefs
+            .get("color_mode")
+            .unwrap_or_else(|| if dark { "dark".into() } else { "light".into() });
+        let panel_on_top: bool = prefs.get("panel_on_top").unwrap_or(false);
+        let window_placement: Option<SavedWindow> = prefs.get("window");
         let locale: String = prefs.get("locale").unwrap_or_else(|| "zh-CN".into());
         let theme: String = prefs.get("theme").unwrap_or_else(|| "ultraviolet".into());
         let history: Vec<String> = prefs.get("history").unwrap_or_default();
@@ -223,6 +257,8 @@ impl Default for Ui {
             alert: None,
             update: None,
             onboarding_open: true,
+            toast: None,
+            toast_seq: 0,
             is_refreshing: false,
             connecting: false,
             pairing: false,
@@ -232,6 +268,10 @@ impl Default for Ui {
             friendly_names: Arc::new(Mutex::new(HashMap::new())),
             last_device_sig: Arc::new(Mutex::new(String::new())),
             dark,
+            color_mode,
+            panel_on_top,
+            window_placement,
+            last_taskbar: None,
             accent: 0,
             theme,
             locale,
@@ -256,6 +296,7 @@ impl Ui {
     pub fn apply_fixture_theme(&mut self, light: bool, tab: SessionKind, theme: &'static str) {
         self.fixture = true;
         self.dark = !light;
+        self.color_mode = if light { "light" } else { "dark" }.into();
         self.theme = theme.into();
         self.locale = "zh-CN".into();
         self.tab = tab;
@@ -306,6 +347,7 @@ impl Ui {
             self.handle_event(ev);
             changed = true;
         }
+        self.sync_taskbar();
         changed
     }
 
@@ -359,7 +401,33 @@ impl Ui {
             "pair-done" => self.pairing = false,
             "history-add" => {
                 if let Ok(v) = serde_json::from_value::<IpPayload>(ev.payload) {
+                    let ip = v.ip.clone();
+                    let title = t(&self.locale, "header.scrcpyReady").to_string();
+                    let detail = tv(&self.locale, "logs.connectedSuccessfully", &[("ip", &ip)]);
+                    self.show_toast(title, detail);
                     self.add_history(v.ip);
+                }
+            }
+            "app-toast" => {
+                let title = ev
+                    .payload
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !title.is_empty() {
+                    let description = ev
+                        .payload
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    self.show_toast(title.to_string(), description);
+                }
+            }
+            "toast-expire" => {
+                let seq = ev.payload.get("seq").and_then(Value::as_u64);
+                if seq == Some(self.toast_seq) {
+                    self.toast = None;
                 }
             }
             "update-available" => {
@@ -407,6 +475,13 @@ impl Ui {
                     .unwrap_or("")
                     .into();
                 if self.download.success {
+                    let title = t(&self.locale, "onboarding.successBinariesActive").to_string();
+                    let detail = if self.download.message.is_empty() {
+                        t(&self.locale, "header.scrcpyReady").to_string()
+                    } else {
+                        self.download.message.clone()
+                    };
+                    self.show_toast(title, detail);
                     self.check_scrcpy();
                     self.refresh_devices();
                 } else {
@@ -415,6 +490,21 @@ impl Ui {
             }
             _ => {}
         }
+    }
+
+    /// Shows one kit toast for a few seconds; a newer toast replaces the older copy.
+    pub fn show_toast(&mut self, title: impl Into<String>, description: impl Into<String>) {
+        self.toast_seq += 1;
+        let seq = self.toast_seq;
+        self.toast = Some(ToastNote {
+            title: title.into(),
+            description: description.into(),
+        });
+        let sink = self.sink.clone();
+        self.runtime.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+            sink.emit("toast-expire", serde_json::json!({ "seq": seq }));
+        });
     }
 
     pub fn log(&mut self, text: String) {
@@ -441,9 +531,24 @@ impl Ui {
         let _ = self.prefs.set("config", &self.config);
     }
 
-    pub fn set_dark(&mut self, dark: bool) {
-        self.dark = dark;
-        let _ = self.prefs.set("dark", &dark);
+    pub fn set_color_mode(&mut self, mode: &str, system_dark: bool) {
+        self.color_mode = mode.to_string();
+        self.dark = match mode {
+            "light" => false,
+            "dark" => true,
+            _ => system_dark,
+        };
+        let _ = self.prefs.set("color_mode", &self.color_mode);
+        let _ = self.prefs.set("dark", &self.dark);
+    }
+
+    /// Whether the UI paints dark for the current mode; `system` asks the window.
+    pub fn resolved_dark(&self, system_dark: bool) -> bool {
+        match self.color_mode.as_str() {
+            "light" => false,
+            "dark" => true,
+            _ => system_dark,
+        }
     }
 
     pub fn set_theme(&mut self, theme: &str) {
@@ -454,6 +559,85 @@ impl Ui {
     pub fn set_locale(&mut self, locale: &str) {
         self.locale = locale.into();
         let _ = self.prefs.set("locale", &self.locale);
+    }
+
+    /// The GUI window's pin; independent of scrcpy's `config.always_on_top`.
+    pub fn toggle_panel_on_top(&mut self) {
+        self.panel_on_top = !self.panel_on_top;
+        let _ = self.prefs.set("panel_on_top", &self.panel_on_top);
+        crate::platform::window::set_always_on_top(self.panel_on_top);
+    }
+
+    /// What the taskbar button should show: busy while downloading, and the
+    /// number of devices with a live scrcpy session.
+    pub fn taskbar_state(&self) -> Taskbar {
+        let running = self.running.values().filter(|live| **live).count() as u32;
+        Taskbar::new()
+            .progress(if self.download.active {
+                TaskbarProgress::Busy
+            } else {
+                TaskbarProgress::None
+            })
+            .badge(running, "Scrcpy sessions")
+    }
+
+    /// Applies the taskbar state only when it changed, from `poll`.
+    pub fn sync_taskbar(&mut self) {
+        let state = self.taskbar_state();
+        if self.last_taskbar.as_ref() != Some(&state) {
+            crate::platform::window::set_taskbar(state.clone());
+            self.last_taskbar = Some(state);
+        }
+    }
+
+    /// Pushes the persisted window flags after the native window (re)appears.
+    pub fn apply_window_state(&mut self) {
+        self.apply_window_placement();
+        crate::platform::window::set_always_on_top(self.panel_on_top);
+        let taskbar = self.taskbar_state();
+        crate::platform::window::set_taskbar(taskbar.clone());
+        self.last_taskbar = Some(taskbar);
+    }
+
+    /// Puts the window back where it was last saved, in logical points.
+    pub fn apply_window_placement(&self) {
+        let Some(saved) = self.window_placement else {
+            return;
+        };
+        crate::platform::window::set_position((saved.x, saved.y));
+        let scale = if saved.scale > 0.0 { saved.scale } else { 1.0 };
+        crate::platform::window::resize_instant((saved.w as f32 / scale, saved.h as f32 / scale));
+    }
+
+    /// Saves the window's place before it closes; `on_close` and `on_quit` both
+    /// call this, so a tray Quit keeps the last on-screen position too.
+    pub fn save_window_placement(&mut self) {
+        let Some(place) = crate::platform::window::placement() else {
+            return;
+        };
+        let saved = SavedWindow {
+            x: place.position.0,
+            y: place.position.1,
+            w: place.content_size.0,
+            h: place.content_size.1,
+            scale: place.scale as f32,
+        };
+        let _ = self.prefs.set("window", &saved);
+    }
+
+    /// Stops every device's scrcpy process, as the tray menu's "Stop all" does.
+    pub fn stop_all(&self) {
+        let devices: Vec<String> = self
+            .state
+            .processes
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for device in devices {
+            self.stop_session(&device);
+        }
     }
 
     pub fn add_history(&mut self, ip: String) {
@@ -911,7 +1095,7 @@ impl Ui {
             "localStorage": {
                 "scrcpy_config": serde_json::to_string(&self.config).unwrap_or_default(),
                 "scrcpy_theme": self.theme,
-                "scrcpy_color_mode": if self.dark { "dark" } else { "light" },
+                "scrcpy_color_mode": self.color_mode,
                 "scrcpy_locale": self.locale,
                 "scrcpy_history": serde_json::to_string(&self.history).unwrap_or_default(),
             },
@@ -927,13 +1111,28 @@ impl Ui {
         );
         let sink = self.sink.clone();
         let content = serde_json::to_string_pretty(&payload).unwrap_or_default();
+        let toast_title = t(&self.locale, "logPanel.report").to_string();
+        let toast_detail = tv(
+            &self.locale,
+            "logPanel.reportSavedAlert",
+            &[("fileName", &name)],
+        );
         self.runtime.spawn(async move {
             let message = match commands::save_report(content, name.clone()).await {
-                Ok(path) => tv(
-                    "zh-CN",
-                    "logPanel.diagnosticReportSaved",
-                    &[("fileName", &name), ("path", &path)],
-                ),
+                Ok(path) => {
+                    sink.emit(
+                        "app-toast",
+                        serde_json::json!({
+                            "title": toast_title,
+                            "description": toast_detail,
+                        }),
+                    );
+                    tv(
+                        "zh-CN",
+                        "logPanel.diagnosticReportSaved",
+                        &[("fileName", &name), ("path", &path)],
+                    )
+                }
                 Err(e) => format!("[ERROR] {e}"),
             };
             sink.emit("scrcpy-log", message);

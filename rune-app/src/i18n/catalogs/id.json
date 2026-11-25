@@ -25,6 +25,7 @@
   "header.colorModes.light": "Terang",
   "header.colorModes.dark": "Gelap",
   "header.colorModes.system": "Sistem",
+  "header.panelOnTopTooltip": "Selalu tampilkan jendela ScrcpyGUI di atas",
   "header.languageLabel": "Bahasa",
   "header.tagline": "Mirror & Kontrol HP Android // dengan Mudah",
   "header.scrcpyEngine": "Sistem Scrcpy",

@@ -58,13 +58,28 @@ Settings keys: `config`, `dark`, `theme`, `locale`, `history`.
 Backend events keep their old names so the ported logic stays recognisable:
 `scrcpy-log` (String), `scrcpy-status` (`{device,running}` or
 `{type,message,percent}`), `scrcpy-window-pos`, plus local bridge events
-(`device-list`, `mdns-list`, `scrcpy-check`, `adb-killed`, `update-available`).
+(`device-list`, `mdns-list`, `scrcpy-check`, `adb-killed`, `update-available`,
+`app-toast` (`{title,description}`), `toast-expire` (`{seq}`)).
 `Ui::handle_event` is the only place that turns them into state.
 
 ## Platform notes
 
 - `grab.rs` is `#[cfg(target_os = "windows")]`; Linux/macOS use xdotool/osascript
   inside `commands.rs` for window position/recenter.
+- `single_instance` is skipped for headless runs (`--scene/--snap/--tree/--script`)
+  so visual checks can run while the GUI is open. Tray creation is skipped there too.
+- Windows starts a tray (`platform/tray.rs`) and uses `keep_running` when it exists:
+  closing the window leaves the process in the notification area; the tray Quit
+  calls `on_quit`, which kills scrcpy children synchronously. macOS has no tray in
+  this Rune rev; Linux gets one only where a tray host runs.
+- The header pin sets the GUI window's `panel_on_top` via
+  `WindowHandle::set_always_on_top`; it is unrelated to scrcpy's
+  `config.always_on_top` (`--always-on-top`). Taskbar Busy/badge state is pushed
+  from `Ui::poll` through `WindowHandle::set_taskbar`.
+- The GUI window's place is saved under the `window` Prefs key on `on_close` /
+  `on_quit` and restored in `on_ready`; sizes are physical, `resize_instant`
+  takes the logical size back. `LiveRegion::Polite` is on the header status and
+  the newest log line.
 - Binary lookup order: custom folder → `scrcpy-bin/` beside the exe → `scrcpy-bin/`
   in the working directory → `PATH`. `adb` and `scrcpy-server` sit beside `scrcpy`.
 - `download_scrcpy` still verifies `SHA256SUMS.txt` before extracting. Keep it.

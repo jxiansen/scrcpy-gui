@@ -1,8 +1,11 @@
 //! Pixel-oriented port of the old React/Tailwind interface to Rune.
 //! Geometry, colours and type scale follow the CSS at commit c4e8721.
 
-use rune::{Color, Cursor, Cx, El, ScrollSpec, TextStyle, col, el, icon, row, text};
-use rune_kit::{Kit, PaletteSeed, Select, SelectAppearance, TextInput};
+use rune::{Color, Cursor, Cx, El, LiveRegion, ScrollSpec, TextStyle, col, el, icon, row, text};
+use rune_kit::{
+    Kit, Menu, MenuItem, PaletteSeed, Select, SelectAppearance, Spinner, TextInput, Toast,
+    ToastRegion,
+};
 
 use crate::i18n::{language_name, t, tv};
 use crate::icons;
@@ -48,7 +51,8 @@ fn kit(p: &Palette) -> Kit {
 }
 
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
-    let p = Palette::new(&s.theme, s.dark);
+    let dark = s.resolved_dark(cx.system_dark());
+    let p = Palette::new(&s.theme, dark);
     let k = kit(&p);
     // Make pressable controls Tab stops and give every control a visible ring.
     cx.web_focus();
@@ -95,7 +99,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .opacity(0.12)
                 .a11y_hidden(),
         )
-        .child(header(s, &p, &k, &mut layer, &tr))
+        .child(header(s, &p, &k, &mut layer, &tr, dark))
         .child(
             row()
                 .key("workspace")
@@ -105,7 +109,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .pt(16.0)
                 .pb(24.0)
                 .gap(24.0)
-                .child(sidebar(s, &p, &k, &tr))
+                .child(sidebar(s, &p, &k, &mut layer, &tr))
                 .child(center(s, &p, &k, &mut layer, &tr))
                 .child(right(s, &p, &k, &mut layer, &tr)),
         )
@@ -120,6 +124,19 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     if let Some(message) = &s.alert {
         layer.push(alert_modal(s, &p, message));
     }
+    // Newest feedback floats above modals; the kit stacks it bottom-right.
+    if let Some(note) = &s.toast {
+        layer.push(
+            ToastRegion::new()
+                .toast(
+                    Toast::new("app-toast", note.title.clone())
+                        .description(note.description.clone())
+                        .on_close(|s: &mut Ui| s.toast = None)
+                        .build(&k),
+                )
+                .build(&k),
+        );
+    }
     rune_kit::root(root, layer)
 }
 
@@ -129,11 +146,12 @@ fn header<F: Fn(&str) -> &'static str>(
     k: &Kit,
     layer: &mut Vec<El>,
     tr: &F,
+    dark: bool,
 ) -> El {
     let mut swatches = row().key("swatches").gap(8.0).center_y();
     for id in THEMES.iter() {
         let theme = *id;
-        let preview = Palette::new(theme, s.dark);
+        let preview = Palette::new(theme, dark);
         let selected = s.theme == theme;
         let name = tr(&format!("header.themes.{theme}"));
         let mut dot = el()
@@ -158,38 +176,35 @@ fn header<F: Fn(&str) -> &'static str>(
         .radius(6.0)
         .fill(p.glass)
         .border(1.0, p.border);
-    let mode_labels = [tr("header.colorModes.light"), tr("header.colorModes.dark")];
-    for (i, label) in mode_labels.iter().enumerate() {
-        let active = (i == 0 && !s.dark) || (i == 1 && s.dark);
+    for mode in ["light", "dark", "system"] {
+        let active = s.color_mode == mode;
+        let label = tr(&format!("header.colorModes.{mode}"));
+        let ink = if !active {
+            p.muted
+        } else if dark {
+            p.on_primary
+        } else {
+            p.primary
+        };
         modes = modes.child(
-            el().key(format!("mode-{i}"))
+            el().key(format!("mode-{mode}"))
                 .h(18.0)
                 .px(5.0)
-                .help(*label)
+                .help(label)
                 .center()
                 .radius(4.0)
                 .fill(if !active {
                     Color::TRANSPARENT
-                } else if s.dark {
+                } else if dark {
                     p.primary
                 } else {
                     p.primary.alpha(0.14)
                 })
-                .on_press(move |s: &mut Ui| {
-                    if i < 2 {
-                        s.set_dark(i == 1);
-                    }
-                })
+                .on_press(move |s: &mut Ui| s.set_color_mode(mode, dark))
                 .child(
                     text(label.to_uppercase())
                         .font(micro(8.0, 900.0, 0.5))
-                        .color(if !active {
-                            p.muted
-                        } else if s.dark {
-                            p.on_primary
-                        } else {
-                            p.primary
-                        }),
+                        .color(ink),
                 ),
         );
     }
@@ -253,15 +268,28 @@ fn header<F: Fn(&str) -> &'static str>(
                         .child(eyebrow(p, tr("header.scrcpyEngine"), 9.0))
                         .child(el().size(6.0, 6.0).radius(3.0).fill(dot)),
                 )
-                .child(
-                    text(status.to_uppercase())
-                        .font(micro(12.0, 900.0, -0.6))
-                        .color(match s.scrcpy_ok {
-                            Some(true) => p.success,
-                            Some(false) => p.danger,
-                            None => p.muted,
-                        }),
-                ),
+                .child({
+                    let mut line = row().key("engine-status-line").gap(6.0).center_y();
+                    if s.download.active {
+                        // Fixed 12 px slot: the percentage text changes width, the spinner does not.
+                        line = line.child(
+                            el().key("sync-spinner")
+                                .size(12.0, 12.0)
+                                .center()
+                                .child(Spinner::new().size(12.0).color(p.success).build(k)),
+                        );
+                    }
+                    line.child(
+                        text(status.to_uppercase())
+                            .font(micro(12.0, 900.0, -0.6))
+                            .live_region(LiveRegion::Polite)
+                            .color(match s.scrcpy_ok {
+                                Some(true) => p.success,
+                                Some(false) => p.danger,
+                                None => p.muted,
+                            }),
+                    )
+                }),
         );
 
     if s.download.active {
@@ -361,11 +389,24 @@ fn header<F: Fn(&str) -> &'static str>(
                 .grow(1.0)
                 .gap(12.0)
                 .center()
+                .child(pin_button(
+                    p,
+                    s.panel_on_top,
+                    tr("sessionBehavior.alwaysOnTop"),
+                    tr("header.panelOnTopTooltip"),
+                    |s: &mut Ui| s.toggle_panel_on_top(),
+                ))
                 .child(engine),
         )
 }
 
-fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> El {
+fn sidebar<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    p: &Palette,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
     let mut device_rows = col()
         .key("devices")
         .gap(6.0)
@@ -440,7 +481,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                             .gap(2.0)
                             .child(
                                 text(device.label())
-                                    .help(device.label())
+                                    .help_when_truncated(device.label())
                                     .font(micro(11.0, 700.0, -0.3))
                                     .truncate()
                                     .color(if selected { p.text } else { p.muted }),
@@ -575,7 +616,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                         .font(micro(10.0, 700.0, 0.0))
                         .color(p.muted)
                         .grow(1.0)
-                        .truncate(),
+                        .truncate()
+                        .help_when_truncated(service.name.clone()),
                 )
                 .child(text(&service.address).font(mono(8.0)).color(p.primary)),
         );
@@ -611,7 +653,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                         .font(micro(10.0, 700.0, 0.0))
                         .color(p.muted)
                         .grow(1.0)
-                        .truncate(),
+                        .truncate()
+                        .help_when_truncated(ip.clone()),
                 )
                 .child(
                     text(tr("sidebar.connect").to_uppercase())
@@ -621,6 +664,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         );
     }
 
+    let adb_trigger = text_button(p, "⋯", p.subtle, 12.0, |s: &mut Ui| s.toggle_adb_menu());
     let hub = section(
         "hub",
         p,
@@ -630,67 +674,34 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
             .center_y()
             .child(eyebrow(p, tr("sidebar.deviceHub"), 11.0).color(p.muted))
             .child(row().grow(1.0))
-            .child(text_button(p, "⋯", p.subtle, 12.0, |s: &mut Ui| {
-                s.toggle_adb_menu()
-            }))
-            .child(text_button(
-                p,
+            .child(adb_menu(s, k, adb_trigger, layer, tr))
+            .child({
+                let mut action = row().gap(6.0).center_y();
                 if s.is_refreshing {
-                    tr("sidebar.syncing")
-                } else {
-                    tr("sidebar.refresh")
-                },
-                p.primary,
-                9.0,
-                |s: &mut Ui| s.refresh_devices(),
-            )),
+                    // 10 px slot beside the label; the label itself keeps its size.
+                    action = action.child(
+                        el().key("refresh-spinner")
+                            .size(10.0, 10.0)
+                            .center()
+                            .child(Spinner::new().size(10.0).color(p.primary).build(k)),
+                    );
+                }
+                action.child(text_button(
+                    p,
+                    if s.is_refreshing {
+                        tr("sidebar.syncing")
+                    } else {
+                        tr("sidebar.refresh")
+                    },
+                    p.primary,
+                    9.0,
+                    |s: &mut Ui| s.refresh_devices(),
+                ))
+            }),
         col()
             .gap(10.0)
-            .child(if s.adb_menu {
-                row()
-                    .gap(8.0)
-                    .padding(8.0)
-                    .radius(8.0)
-                    .fill(p.elevated)
-                    .child(
-                        text(if s.confirm_kill_adb {
-                            tr("ui.confirmEndAdb")
-                        } else {
-                            tr("ui.endAdb")
-                        })
-                        .font(micro(10.0, 500.0, 0.0))
-                        .color(if s.confirm_kill_adb {
-                            p.danger
-                        } else {
-                            p.muted
-                        })
-                        .grow(1.0),
-                    )
-                    .child(text_button(
-                        p,
-                        if s.confirm_kill_adb {
-                            tr("common.confirm")
-                        } else {
-                            tr("ui.end")
-                        },
-                        if s.confirm_kill_adb {
-                            p.danger
-                        } else {
-                            p.primary
-                        },
-                        9.0,
-                        |s: &mut Ui| s.confirm_kill_adb(),
-                    ))
-                    .child(text_button(
-                        p,
-                        tr("common.cancel"),
-                        p.subtle,
-                        9.0,
-                        |s: &mut Ui| s.toggle_adb_menu(),
-                    ))
-            } else {
-                el().size(0.0, 0.0)
-            })
+            // The old inline ADB row left a 10 px gap above the list; keep the closed layout identical.
+            .pt(10.0)
             .child(device_rows.scroll(ScrollSpec {
                 stick_bottom: false,
             }))
@@ -733,11 +744,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                         false,
                     ))
                     .child(
-                        row()
-                            .gap(6.0)
-                            .center_y()
-                            .child(ip_input)
-                            .child(solid_button(
+                        row().gap(6.0).items_end().child(ip_input).child(
+                            solid_button(
                                 p,
                                 if s.connecting {
                                     tr("sidebar.connecting")
@@ -751,7 +759,9 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                                     let ip = s.ip.text.clone();
                                     s.connect(ip);
                                 },
-                            )),
+                            )
+                            .h(36.0),
+                        ),
                     )
                     .child(section_label(p, tr("sidebar.discoveredDevices"), true))
                     .child(wifi_rows.max_h(100.0).scroll(ScrollSpec {
@@ -848,6 +858,45 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+}
+
+/// The sidebar `⋯` menu. "End ADB" arms a confirmation inside the menu itself, so the
+/// device list never gets pushed down by an extra inline row.
+fn adb_menu<F: Fn(&str) -> &'static str>(
+    s: &Ui,
+    k: &Kit,
+    trigger: El,
+    layer: &mut Vec<El>,
+    tr: &F,
+) -> El {
+    let mut menu = Menu::new("adb")
+        .trigger(trigger)
+        .open(s.adb_menu)
+        .min_width(180.0)
+        .on_close(|s: &mut Ui| {
+            s.adb_menu = false;
+            s.confirm_kill_adb = false;
+        });
+    if s.confirm_kill_adb {
+        menu = menu
+            .group_label(tr("ui.confirmEndAdb"))
+            .item(
+                MenuItem::new(tr("ui.end"))
+                    .danger(true)
+                    .on_select(|s: &mut Ui| s.confirm_kill_adb()),
+            )
+            .item(MenuItem::new(tr("common.cancel")).on_select(|s: &mut Ui| {
+                s.adb_menu = false;
+                s.confirm_kill_adb = false;
+            }));
+    } else {
+        menu = menu.item(
+            MenuItem::new(tr("ui.endAdb"))
+                .danger(true)
+                .on_select(|s: &mut Ui| s.confirm_kill_adb()),
+        );
+    }
+    menu.build(k, layer)
 }
 
 fn center<F: Fn(&str) -> &'static str>(
@@ -1303,7 +1352,7 @@ fn desktop_config<F: Fn(&str) -> &'static str>(
                 .child(
                     TextInput::new(&s.background_color)
                         .plain()
-                        .label("Background color")
+                        .label(tr("controlPanel.backgroundColor"))
                         .width(Some(100.0))
                         .on_edit(|s: &mut Ui| &mut s.background_color)
                         .on_submit(|s: &mut Ui, _| {
@@ -1712,11 +1761,13 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
         );
     }
     for (i, (time, line)) in s.logs.iter().enumerate() {
+        let mut entry = row().key(format!("log-{i}")).gap(12.0).pl(12.0);
+        // The newest line is polite: a reader hears it once, not the whole console.
+        if i + 1 == s.logs.len() {
+            entry = entry.live_region(LiveRegion::Polite);
+        }
         lines = lines.child(
-            row()
-                .key(format!("log-{i}"))
-                .gap(12.0)
-                .pl(12.0)
+            entry
                 .child(text(time.clone()).font(mono(11.0)).color(hex("a1a1aa")))
                 .child(
                     text(line.clone())
@@ -1781,7 +1832,7 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
                 .child(
                     TextInput::new(&s.command)
                         .plain()
-                        .label("Command")
+                        .label(tr("logPanel.terminalPlaceholder"))
                         .placeholder(tr("logPanel.terminalPlaceholder"))
                         .width(None)
                         .on_edit(|s: &mut Ui| &mut s.command)
@@ -1796,28 +1847,10 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
 }
 
 fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
-    let link = |label: &str, url: &str, tint: Color| {
-        let target = url.to_string();
-        text(label.to_uppercase())
-            .role("button")
-            .label(label)
-            .font(micro(11.0, 500.0, 0.0))
-            .color(tint)
-            .py(6.0)
-            .hover(p.primary.alpha(0.08))
-            .on_press_tx(move |_: &mut Ui, tx: &mut rune::Tx| {
-                let _ = tx.open_url(&target);
-            })
-    };
-    let version = format!(
-        "v{} · {}",
-        env!("CARGO_PKG_VERSION"),
-        tr("footer.createdBy")
-    );
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let meta = format!(
-        "{}: SCRCPY  {}: RUNE  {}: RUST",
+        "{}: SCRCPY   {}: RUNE   RUST",
         tr("footer.core").to_uppercase(),
-        tr("footer.client").to_uppercase(),
         tr("footer.ui").to_uppercase()
     );
     col()
@@ -1834,48 +1867,19 @@ fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
                 .gap(24.0)
                 .center_y()
                 .child(
-                    text(tr("footer.aboutScrcpyGui").to_uppercase())
+                    text("SCRCPY GUI")
                         .font(micro(13.0, 600.0, 0.0))
                         .color(p.muted),
                 )
-                .child(
-                    row()
-                        .grow(1.0)
-                        .gap(28.0)
-                        .center()
-                        .child(link(
-                            tr("footer.github"),
-                            "https://github.com/kil0bit-kb",
-                            p.subtle,
-                        ))
-                        .child(link(
-                            tr("footer.youtube"),
-                            "https://www.youtube.com/@kilObit",
-                            p.subtle,
-                        ))
-                        .child(link(
-                            tr("footer.website"),
-                            "https://kil0bit.blogspot.com/",
-                            p.subtle,
-                        ))
-                        .child(link(
-                            tr("footer.support"),
-                            "https://www.patreon.com/cw/KB_kilObit",
-                            hex("6d28d9"),
-                        )),
-                ),
+                .child(row().grow(1.0))
+                .child(text(version).font(micro(11.0, 400.0, 0.0)).color(p.subtle)),
         )
         .child(
             row()
                 .gap(24.0)
                 .center_y()
-                .child(text(version).font(micro(11.0, 400.0, 0.0)).color(p.subtle))
-                .child(
-                    row()
-                        .grow(1.0)
-                        .center()
-                        .child(text(meta).font(micro(11.0, 400.0, 0.0)).color(p.subtle)),
-                ),
+                .child(text(meta).font(micro(11.0, 400.0, 0.0)).color(p.subtle))
+                .child(row().grow(1.0)),
         )
 }
 
@@ -2038,7 +2042,7 @@ fn update_modal<F: Fn(&str) -> &'static str>(
         )
 }
 
-fn alert_modal(_s: &Ui, p: &Palette, message: &str) -> El {
+fn alert_modal(s: &Ui, p: &Palette, message: &str) -> El {
     col()
         .key("alert-modal")
         .cursor(Cursor::Pointer)
@@ -2066,9 +2070,14 @@ fn alert_modal(_s: &Ui, p: &Palette, message: &str) -> El {
                         .center(),
                 )
                 .child(
-                    solid_button(p, "OK", p.primary, p.on_primary, 10.0, |s: &mut Ui| {
-                        s.alert = None
-                    })
+                    solid_button(
+                        p,
+                        t(&s.locale, "common.ok"),
+                        p.primary,
+                        p.on_primary,
+                        10.0,
+                        |s: &mut Ui| s.alert = None,
+                    )
                     .autofocus(),
                 ),
         )
@@ -2143,6 +2152,28 @@ fn badge(_p: &Palette, label: &str, tint: Color) -> El {
         .radius(4.0)
         .fill(tint.alpha(0.1))
         .border(1.0, tint.alpha(0.25))
+}
+
+/// The GUI window's always-on-top toggle; a fixed 24×24 hit target in the header.
+fn pin_button(p: &Palette, on: bool, label: &str, help: &str, f: impl Fn(&mut Ui) + 'static) -> El {
+    row()
+        .key("panel-pin")
+        .role("button")
+        .label(label)
+        .help(help)
+        .size(24.0, 24.0)
+        .center()
+        .radius(6.0)
+        .fill(if on {
+            p.primary.alpha(0.18)
+        } else {
+            p.input.alpha(0.4)
+        })
+        .border(1.0, if on { p.primary.alpha(0.55) } else { p.border })
+        .on_press(f)
+        .hover(p.primary.alpha(0.1))
+        .press(p.primary.alpha(0.16))
+        .child(icon(&icons::PIN, 14.0).color(if on { p.primary } else { p.subtle }))
 }
 
 fn text_button(
@@ -2272,6 +2303,7 @@ fn checkbox(p: &Palette, label: &str, checked: bool, f: impl Fn(&mut Ui) + 'stat
         .child(
             el().size(14.0, 14.0)
                 .radius(4.0)
+                .center()
                 .fill(if checked {
                     p.primary
                 } else {
@@ -2279,11 +2311,7 @@ fn checkbox(p: &Palette, label: &str, checked: bool, f: impl Fn(&mut Ui) + 'stat
                 })
                 .border(1.0, if checked { p.primary } else { p.border_subtle })
                 .child(if checked {
-                    el().size(6.0, 6.0)
-                        .radius(1.0)
-                        .center()
-                        .self_center()
-                        .fill(p.on_primary)
+                    icon(&rune_kit::glyphs::CHECK_SMALL, 10.0).color(p.on_primary)
                 } else {
                     el().size(0.0, 0.0)
                 }),
@@ -2508,18 +2536,52 @@ fn select(
     label: &str,
     width: f32,
 ) -> El {
-    Select::new(key, options)
+    let labels: Vec<String> = options
+        .iter()
+        .map(|value| option_label(&s.locale, key, value))
+        .collect();
+    let raw: Vec<String> = options.iter().map(|value| (*value).to_string()).collect();
+    let current_label = option_label(&s.locale, key, current);
+    Select::new(key, &labels)
         .width(width)
-        .current(Some(current))
+        .current(Some(&current_label))
         .label(label)
         .appearance(SelectAppearance::Field)
         .open(s.open_select.as_deref() == Some(key))
         .on_toggle(move |s: &mut Ui| toggle_select(s, key))
         .on_close(|s: &mut Ui| s.open_select = None)
-        .on_choose(move |s: &mut Ui, v: &str, _| apply_choice(s, key, v))
+        .on_choose(move |s: &mut Ui, chosen: &str, _| {
+            if let Some(i) = labels.iter().position(|label| label == chosen) {
+                apply_choice(s, key, &raw[i]);
+            }
+        })
         .build(k, layer)
         .grow(1.0)
         .min_w(0.0)
+}
+
+/// Display labels for values whose raw form is a config token. The raw value
+/// stays the source of truth for `apply_choice`; only the picker reads this.
+fn option_label(locale: &str, key: &str, value: &str) -> String {
+    let label_key = match (key, value) {
+        ("fps" | "renderer", "Auto") | ("hwdec", "auto") => "controlPanel.rendererAuto",
+        ("audio", "auto") => "sessionBehavior.audioCodecAuto",
+        ("hwdec", "disabled") => "controlPanel.hardwareDecodingDisabled",
+        ("res", "0") => "controlPanel.resolutionOriginal",
+        ("aspect", "0") => "controlPanel.aspectDefault",
+        ("lens", "Auto Select") => "controlPanel.autoSelect",
+        ("lens", "Back") => "controlPanel.facingBack",
+        ("lens", "Front") => "controlPanel.facingFront",
+        ("lens", "External") => "controlPanel.facingExternal",
+        ("preset", "Custom") => "controlPanel.custom",
+        ("preset", "1080p") => "controlPanel.preset1080p",
+        ("preset", "1440p") => "controlPanel.preset1440p",
+        ("preset", "4K") => "controlPanel.preset4k",
+        ("preset", "21:9") => "controlPanel.presetUltrawide",
+        ("rotation", _) => return format!("{value}°"),
+        _ => return value.to_string(),
+    };
+    t(locale, label_key).to_string()
 }
 
 fn toggle_select(s: &mut Ui, key: &str) {

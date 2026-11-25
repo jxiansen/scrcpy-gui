@@ -25,6 +25,7 @@
   "header.colorModes.light": "فاتح",
   "header.colorModes.dark": "داكن",
   "header.colorModes.system": "النظام",
+  "header.panelOnTopTooltip": "إبقاء نافذة ScrcpyGUI في المقدمة",
   "header.languageLabel": "اللغة",
   "header.tagline": "اعكس شاشة Android وتحكم بها بسهولة",
   "header.scrcpyEngine": "محرك Scrcpy",

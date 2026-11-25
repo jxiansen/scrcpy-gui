@@ -25,6 +25,7 @@
   "header.colorModes.light": "Clair",
   "header.colorModes.dark": "Sombre",
   "header.colorModes.system": "Système",
+  "header.panelOnTopTooltip": "Garder la fenêtre ScrcpyGUI au premier plan",
   "header.languageLabel": "Langue",
   "header.tagline": "Miroir & Contrôle Android // Appareils Facilement",
   "header.scrcpyEngine": "Moteur Scrcpy",
