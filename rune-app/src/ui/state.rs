@@ -249,9 +249,13 @@ impl Default for Ui {
 impl Ui {
     /// Fixed data for `cargo run -- --scene compare-*`; no ADB, no clock, no prefs.
     pub fn apply_fixture(&mut self, light: bool, tab: SessionKind) {
+        self.apply_fixture_theme(light, tab, "ultraviolet");
+    }
+
+    pub fn apply_fixture_theme(&mut self, light: bool, tab: SessionKind, theme: &'static str) {
         self.fixture = true;
         self.dark = !light;
-        self.theme = "ultraviolet".into();
+        self.theme = theme.into();
         self.locale = "zh-CN".into();
         self.tab = tab;
         self.transport = Transport::Usb;

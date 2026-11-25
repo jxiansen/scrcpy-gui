@@ -39,6 +39,22 @@ fn scene_desktop(s: &mut Ui) {
     s.apply_fixture(false, SessionKind::Desktop);
 }
 
+fn scene_bloodmoon(s: &mut Ui) {
+    s.apply_fixture_theme(false, SessionKind::Mirror, "bloodmoon");
+}
+
+fn scene_emerald(s: &mut Ui) {
+    s.apply_fixture_theme(false, SessionKind::Mirror, "emerald");
+}
+
+fn scene_astro(s: &mut Ui) {
+    s.apply_fixture_theme(false, SessionKind::Mirror, "astro");
+}
+
+fn scene_carbon(s: &mut Ui) {
+    s.apply_fixture_theme(false, SessionKind::Mirror, "carbon");
+}
+
 fn setup(ui: &mut Ui, waker: Waker) {
     ui.setup(waker);
 }
@@ -56,6 +72,10 @@ fn main() {
             ("compare-light", scene_light),
             ("compare-camera", scene_camera),
             ("compare-desktop", scene_desktop),
+            ("compare-bloodmoon", scene_bloodmoon),
+            ("compare-emerald", scene_emerald),
+            ("compare-astro", scene_astro),
+            ("compare-carbon", scene_carbon),
         ],
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)
     };

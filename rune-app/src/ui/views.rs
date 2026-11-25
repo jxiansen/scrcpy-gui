@@ -92,7 +92,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
                 .w_full()
                 .h_full()
                 .pixels(&s.noise)
-                .opacity(0.2)
+                .opacity(0.12)
                 .a11y_hidden(),
         )
         .child(header(s, &p, &k, &tr))
@@ -129,17 +129,18 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
         let theme = *id;
         let preview = Palette::new(theme, s.dark);
         let selected = s.theme == theme;
-        swatches = swatches.child(
-            el().key(format!("swatch-{theme}"))
-                .size(16.0, 16.0)
-                .radius(8.0)
-                .fill(preview.primary)
-                .border(
-                    if selected { 3.0 } else { 1.0 },
-                    if selected { p.bg } else { p.border_subtle },
-                )
-                .on_press(move |s: &mut Ui| s.set_theme(theme)),
-        );
+        let mut dot = el()
+            .key(format!("swatch-{theme}"))
+            .size(16.0, 16.0)
+            .radius(8.0)
+            .fill(preview.primary)
+            .border(1.0, p.border_subtle)
+            .help(tr(&format!("header.themes.{theme}")))
+            .on_press(move |s: &mut Ui| s.set_theme(theme));
+        if selected {
+            dot = dot.outline(2.0, 2.0, p.text);
+        }
+        swatches = swatches.child(dot);
     }
 
     let mut modes = row()
@@ -156,6 +157,7 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
             el().key(format!("mode-{i}"))
                 .h(18.0)
                 .px(5.0)
+                .help(*label)
                 .center()
                 .radius(4.0)
                 .fill(if !active {
@@ -309,13 +311,7 @@ fn header<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) -> 
                 .grow(1.0)
                 .gap(20.0)
                 .center_y()
-                .child(
-                    row()
-                        .gap(12.0)
-                        .center_y()
-                        .child(el().size(12.0, 12.0).radius(6.0).fill(p.primary))
-                        .child(eyebrow(p, tr("header.themeLabel"), 9.0)),
-                )
+                .child(eyebrow(p, tr("header.themeLabel"), 9.0))
                 .child(swatches)
                 .child(modes)
                 .child(lang),
@@ -380,7 +376,14 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                     text(tr("sidebar.noDevicesDetected"))
                         .font(micro(10.0, 400.0, 0.0).italic())
                         .color(p.subtle),
-                ),
+                )
+                .child(text_button(
+                    p,
+                    tr("sidebar.refresh"),
+                    p.primary,
+                    9.0,
+                    |s: &mut Ui| s.refresh_devices(),
+                )),
         );
     }
     for device in &s.devices {
@@ -429,6 +432,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                             .gap(2.0)
                             .child(
                                 text(device.label())
+                                    .help(device.label())
                                     .font(micro(11.0, 700.0, -0.3))
                                     .truncate()
                                     .color(if selected { p.text } else { p.muted }),
@@ -540,6 +544,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                 .radius(8.0)
                 .fill(p.input.alpha(0.2))
                 .border(1.0, p.border.alpha(0.5))
+                .help("点击填入地址")
                 .on_press(move |s: &mut Ui| s.ip.replace_text(address.clone()))
                 .hover(p.primary.alpha(0.06))
                 .press(p.primary.alpha(0.12))
@@ -713,8 +718,8 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
                                 } else {
                                     tr("sidebar.connect")
                                 },
-                                p.input,
-                                p.text,
+                                p.primary.alpha(0.14),
+                                p.primary,
                                 10.0,
                                 |s: &mut Ui| {
                                     let ip = s.ip.text.clone();
@@ -767,6 +772,7 @@ fn sidebar<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, k: &Kit, tr: &F) ->
             },
         )
         .radius(12.0)
+        .help(tr("sidebar.flashPushSubtitle"))
         .hover(p.primary.alpha(0.04))
         .on_drop_hover(|s: &mut Ui, over: bool, _| s.drop_hover = over)
         .on_press_tx(|s: &mut Ui, tx: &mut rune::Tx| {
@@ -1525,6 +1531,7 @@ fn right<F: Fn(&str) -> &'static str>(
             r = r.child(
                 row()
                     .key(*key)
+                    .help(format!("Alt+{key}: {label}"))
                     .h(36.0)
                     .grow(1.0)
                     .min_w(0.0)
@@ -1693,10 +1700,18 @@ fn log_panel<F: Fn(&str) -> &'static str>(s: &Ui, p: &Palette, tr: &F) -> El {
 }
 
 fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
-    let link = |label: &str, tint: Color| {
+    let link = |label: &str, url: &str, tint: Color| {
+        let target = url.to_string();
         text(label.to_uppercase())
+            .role("button")
+            .label(label)
             .font(micro(11.0, 500.0, 0.0))
             .color(tint)
+            .py(6.0)
+            .hover(p.primary.alpha(0.08))
+            .on_press_tx(move |_: &mut Ui, tx: &mut rune::Tx| {
+                let _ = tx.open_url(&target);
+            })
     };
     let version = format!("v{} · 由 KB 制作", env!("CARGO_PKG_VERSION"));
     let meta = format!(
@@ -1728,10 +1743,26 @@ fn footer<F: Fn(&str) -> &'static str>(p: &Palette, tr: &F) -> El {
                         .grow(1.0)
                         .gap(28.0)
                         .center()
-                        .child(link(tr("footer.github"), p.subtle))
-                        .child(link(tr("footer.youtube"), p.subtle))
-                        .child(link(tr("footer.website"), p.subtle))
-                        .child(link(tr("footer.support"), hex("6d28d9"))),
+                        .child(link(
+                            tr("footer.github"),
+                            "https://github.com/kil0bit-kb",
+                            p.subtle,
+                        ))
+                        .child(link(
+                            tr("footer.youtube"),
+                            "https://www.youtube.com/@kilObit",
+                            p.subtle,
+                        ))
+                        .child(link(
+                            tr("footer.website"),
+                            "https://kil0bit.blogspot.com/",
+                            p.subtle,
+                        ))
+                        .child(link(
+                            tr("footer.support"),
+                            "https://www.patreon.com/cw/KB_kilObit",
+                            hex("6d28d9"),
+                        )),
                 ),
         )
         .child(
@@ -2027,6 +2058,7 @@ fn text_button(
         .py(8.0)
         .px(6.0)
         .radius(4.0)
+        .help(label)
         .on_press(f)
         .hover(tint.alpha(0.08))
         .press(tint.alpha(0.16))
@@ -2149,7 +2181,7 @@ fn checkbox(p: &Palette, label: &str, checked: bool, f: impl Fn(&mut Ui) + 'stat
                         .radius(1.0)
                         .center()
                         .self_center()
-                        .fill(p.bg)
+                        .fill(p.on_primary)
                 } else {
                     el().size(0.0, 0.0)
                 }),
@@ -2268,7 +2300,14 @@ fn slider_row(
                                 .h(4.0)
                                 .radius(2.0)
                                 .fill(p.primary)
-                                .child(el().size(14.0, 14.0).radius(7.0).center().fill(p.primary)),
+                                .justify_end()
+                                .child(
+                                    el().size(14.0, 14.0)
+                                        .radius(7.0)
+                                        .self_center()
+                                        .fill(p.primary)
+                                        .border(2.0, p.bg),
+                                ),
                         ),
                 )
                 .child(step_button(p, "-", field, -1))
