@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "End ADB?",
   "ui.end": "End",
   "ui.useAddress": "Click to use this address",
-  "footer.createdBy": "Created with love by KB"
+  "footer.createdBy": "Created with love by KB",
+  "settings.title": "الإعدادات",
+  "advanced.title": "إعدادات متقدمة",
+  "device.disconnect": "قطع الاتصال",
+  "device.emptyTitle": "وصّل هاتفك",
+  "device.emptyBody": "وصّل عبر USB أو اقترن عبر Wi-Fi للبدء.",
+  "device.live": "جارٍ العرض",
+  "device.modeNote": "تُطبق التغييرات عند بدء الجلسة التالية.",
+  "settings.appearance": "المظهر",
+  "settings.cardSub": "العرض والفيديو وعناصر التحكم في الإدخال.",
+  "settings.inputGroup": "الإدخال والصوت",
+  "device.select": "اختر جهازًا"
 }

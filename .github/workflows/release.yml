@@ -5,10 +5,15 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  publish:
-    permissions:
-      contents: write
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +25,7 @@ jobs:
           - os: macos-latest
             asset: scrcpy-gui-macos
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -40,7 +46,7 @@ jobs:
             libudev-dev libasound2-dev
 
       - name: Build release binary
-        run: cargo build --release -p scrcpy-gui
+        run: cargo build --release --locked -p scrcpy-gui
 
       - name: Stage asset (Unix)
         if: runner.os != 'Windows'
@@ -50,8 +56,31 @@ jobs:
         if: runner.os == 'Windows'
         run: copy target\release\scrcpy-gui.exe ${{ matrix.asset }}
 
-      - name: Publish
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  # One publisher, not three matrix jobs racing to create the same draft
+  # release (which used to lose assets or produce duplicate drafts).
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download all staged assets
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: ${{ matrix.asset }}
+          generate_release_notes: true
+          files: artifacts/*

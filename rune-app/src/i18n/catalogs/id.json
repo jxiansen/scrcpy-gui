@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "End ADB?",
   "ui.end": "End",
   "ui.useAddress": "Click to use this address",
-  "footer.createdBy": "Created with love by KB"
+  "footer.createdBy": "Created with love by KB",
+  "settings.title": "Pengaturan",
+  "advanced.title": "Pengaturan lanjutan",
+  "device.disconnect": "Putuskan",
+  "device.emptyTitle": "Hubungkan ponsel Anda",
+  "device.emptyBody": "Sambungkan lewat USB atau pasangkan lewat Wi-Fi.",
+  "device.live": "Sedang menampilkan",
+  "device.modeNote": "Perubahan berlaku saat sesi berikutnya dimulai.",
+  "settings.appearance": "Tampilan",
+  "settings.cardSub": "Tampilan, video, dan kontrol input.",
+  "settings.inputGroup": "Input & audio",
+  "device.select": "Pilih perangkat"
 }

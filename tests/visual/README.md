@@ -5,12 +5,17 @@ Three complementary checks, from deterministic to human-in-the-loop.
 ## Layer 1 — structural assertions (CI gate)
 
 ```bash
-python scripts/visual_tree_check.py compare-dark
+python scripts/visual_tree_check.py                 # all six scenes (CI default)
+python scripts/visual_tree_check.py compare-dark   # one scene while iterating
+python scripts/visual_tree_check.py --list
 ```
 
-Renders a deterministic fixture scene and asserts key rects, fills, radii, font
-styles and text from Rune's `--tree` JSON. This is the hard gate because it is
-immune to font rasterisation differences.
+Renders the deterministic fixture scenes and asserts key rects, element keys,
+labels, text and state flags from Rune's `--tree` JSON — plus the settings
+drawer, advanced card and expanded console states in `compare-dark`. This is
+the hard gate because it is immune to font rasterisation differences. CI runs
+it through `python scripts/check.py` on both Linux and Windows, covering all
+six scenes.
 
 Fixtures (set with `--scene`): `compare-dark`, `compare-light`, `compare-camera`,
 `compare-desktop`, `compare-en`, `compare-empty`. They freeze appearance, locale,
@@ -20,9 +25,12 @@ ADB/Prefs work.
 ## Layer 2 — golden PNG regression
 
 ```bash
-python scripts/visual_image_check.py            # compare with committed goldens
-python scripts/visual_image_check.py --bless    # update goldens after a deliberate change
+python scripts/visual_image_check.py                     # compare with committed goldens
+python scripts/visual_image_check.py --bless              # update goldens after a deliberate change
+python scripts/visual_image_check.py --scene compare-dark # limit a run to one scene
 ```
+
+Only bless on Windows (see below), and review the PNG diff before committing.
 
 Renders the same six fixtures with `--snap`, compares each 2400×1780 PNG with
 `tests/visual/golden/<scene>.png`, and writes a heatmap + JSON report to
@@ -59,7 +67,8 @@ python scripts/visual_diff.py tests/visual/reference/old-ui-dark.png \
 ```
 
 After the rune-kit shell migration the old-vs-new diff is expected to be large:
-the three-column chrome, typography and controls were intentionally replaced.
+the flat rail + main + drawer shell, typography and controls were intentionally
+replaced.
 Use it as a reference/heatmap, not as a regression gate; the rune-kit structural
 checks and the new goldens are the gates.
 

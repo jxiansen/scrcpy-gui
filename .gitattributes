@@ -1,0 +1,8 @@
+# Visual goldens and release assets are binary: never normalise their bytes.
+# Text line endings are left alone (the locale catalogs are historically CRLF);
+# .editorconfig pins LF for newly created source/config files instead.
+*.png binary
+*.ico binary
+*.exe binary
+*.zip binary
+*.gz binary

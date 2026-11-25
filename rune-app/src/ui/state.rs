@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 
 use rune::prefs::Prefs;
 use rune::{Taskbar, TaskbarProgress, TextEdit, Waker};
-use rune_kit::PaneState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -148,15 +147,16 @@ pub struct Ui {
     pub transport: Transport,
     pub adb_menu: bool,
     pub confirm_kill_adb: bool,
-    /// Shell panes (official `SplitView`): width and collapsed state survive in memory.
-    pub sidebar: PaneState,
-    pub inspector: PaneState,
     /// The Connect / pair dialog.
     pub connect_open: bool,
     /// The About dialog.
     pub about_open: bool,
-    /// The toolbar overflow menu.
-    pub app_menu: bool,
+    /// The right-side settings drawer.
+    pub settings_open: bool,
+    /// The settings card's advanced section.
+    pub advanced_open: bool,
+    /// The bottom console, expanded.
+    pub console_open: bool,
     pub ip: TextEdit,
     pub pair_ip: TextEdit,
     pub pair_code: TextEdit,
@@ -240,11 +240,11 @@ impl Default for Ui {
             transport: Transport::Usb,
             adb_menu: false,
             confirm_kill_adb: false,
-            sidebar: PaneState::new(286.0).range(220.0, 380.0),
-            inspector: PaneState::new(308.0).range(240.0, 420.0),
             connect_open: false,
             about_open: false,
-            app_menu: false,
+            settings_open: false,
+            advanced_open: false,
+            console_open: false,
             ip: TextEdit::new(""),
             pair_ip: TextEdit::new(""),
             pair_code: TextEdit::new(""),
@@ -290,6 +290,19 @@ impl Ui {
         self.locale = "zh-CN".into();
         self.tab = tab;
         self.transport = Transport::Usb;
+        self.config = default_config();
+        self.panel_on_top = false;
+        self.remember_position = true;
+        self.settings_open = false;
+        self.advanced_open = false;
+        self.console_open = false;
+        self.connect_open = false;
+        self.about_open = false;
+        self.confirm_kill_adb = false;
+        self.open_select = None;
+        self.alert = None;
+        self.update = None;
+        self.toast = None;
         self.config.device = "706fc5a1".into();
         self.config.session_mode = tab.as_str().into();
         self.config.bitrate = Some(8);
@@ -310,6 +323,7 @@ impl Ui {
             ("12:34:56".into(), "[SYSTEM] ScrcpyGUI ready".into()),
             ("12:34:56".into(), "[SYSTEM] Device: PJA110".into()),
         ];
+        self.history = vec!["192.168.1.42:5555".into(), "10.0.0.8:5555".into()];
         self.ip.replace_text("192.168.x.x:5555");
         self.pair_ip.replace_text("192.168.x.x:55");
         self.background_color.replace_text("");
@@ -517,6 +531,9 @@ impl Ui {
     }
 
     pub fn save_config(&mut self) {
+        if self.fixture {
+            return;
+        }
         let _ = self.prefs.set("config", &self.config);
     }
 
@@ -527,6 +544,9 @@ impl Ui {
             "dark" => true,
             _ => system_dark,
         };
+        if self.fixture {
+            return;
+        }
         let _ = self.prefs.set("color_mode", &self.color_mode);
         let _ = self.prefs.set("dark", &self.dark);
     }
@@ -542,6 +562,9 @@ impl Ui {
 
     pub fn set_locale(&mut self, locale: &str) {
         self.locale = locale.into();
+        if self.fixture {
+            return;
+        }
         let _ = self.prefs.set("locale", &self.locale);
     }
 
@@ -638,6 +661,9 @@ impl Ui {
 
     pub fn toggle_remember_position(&mut self) {
         self.remember_position = !self.remember_position;
+        if self.fixture {
+            return;
+        }
         let _ = self.prefs.set("remember_position", &self.remember_position);
         if !self.remember_position {
             self.config.window_x = None;
@@ -907,6 +933,20 @@ impl Ui {
             sink.emit("refresh-request", serde_json::json!({}));
             sink.emit("pair-done", serde_json::json!({}));
         });
+    }
+
+    /// Clears the selected device, stopping its session first if it is running.
+    pub fn disconnect_device(&mut self) {
+        let serial = self.config.device.clone();
+        if serial.is_empty() {
+            return;
+        }
+        if self.running.get(&serial).copied().unwrap_or(false) {
+            self.stop_session(&serial);
+        }
+        self.config.device.clear();
+        self.save_config();
+        self.set_active_device(None);
     }
 
     pub fn select_device(&mut self, serial: String) {

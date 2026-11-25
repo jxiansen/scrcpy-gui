@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "確認結束 ADB?",
   "ui.end": "結束",
   "ui.useAddress": "點擊使用此位址",
-  "footer.createdBy": "由 KB 製作"
+  "footer.createdBy": "由 KB 製作",
+  "settings.title": "設定",
+  "advanced.title": "進階設定",
+  "device.disconnect": "斷開",
+  "device.emptyTitle": "連接你的手機",
+  "device.emptyBody": "透過 USB 連接，或使用 Wi-Fi 配對後開始。",
+  "device.live": "正在投屏",
+  "device.modeNote": "改動將在下次啟動時生效。",
+  "settings.appearance": "外觀",
+  "settings.cardSub": "畫面、編碼與輸入控制。",
+  "settings.inputGroup": "輸入與音訊",
+  "device.select": "選擇裝置"
 }

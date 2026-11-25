@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "确认结束 ADB?",
   "ui.end": "结束",
   "ui.useAddress": "点击填入地址",
-  "footer.createdBy": "由 KB 制作"
+  "footer.createdBy": "由 KB 制作",
+  "settings.title": "设置",
+  "advanced.title": "高级设置",
+  "device.disconnect": "断开",
+  "device.emptyTitle": "连接你的手机",
+  "device.emptyBody": "通过 USB 连接，或使用 Wi-Fi 配对后开始。",
+  "device.live": "正在投屏",
+  "device.modeNote": "改动将在下次启动时生效。",
+  "settings.appearance": "外观",
+  "settings.cardSub": "画面、编码与输入控制。",
+  "settings.inputGroup": "输入与音频",
+  "device.select": "选择设备"
 }

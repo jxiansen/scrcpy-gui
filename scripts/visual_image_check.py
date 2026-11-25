@@ -37,6 +37,8 @@ def render(scene: str, target: Path) -> bool:
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         print(f"FAILED to render {scene}:\n{proc.stderr[-2000:]}", file=sys.stderr)
@@ -49,13 +51,20 @@ def main() -> int:
     parser.add_argument("--bless", action="store_true", help="overwrite goldens with current renders")
     parser.add_argument("--max-mae", type=float, default=8.0)
     parser.add_argument("--threshold", type=int, default=16)
+    parser.add_argument(
+        "--scene",
+        action="append",
+        choices=SCENES,
+        help="render only this scene (repeatable; default: all six)",
+    )
     args = parser.parse_args()
 
+    scenes = args.scene or SCENES
     GOLDEN.mkdir(parents=True, exist_ok=True)
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        for scene in SCENES:
+        for scene in scenes:
             shot = tmpdir / f"{scene}.png"
             if not render(scene, shot):
                 failures += 1
@@ -82,6 +91,10 @@ def main() -> int:
                     print(f"    cell({region['col']},{region['row']}) MAE={region['mae']}")
 
     if args.bless:
+        print(
+            f"BLESSED {len(scenes)} scene(s). Review the PNG diff before committing; "
+            "goldens are captured on Windows."
+        )
         return 0
     if failures:
         print(f"{failures} scene(s) failed; see {OUT.relative_to(ROOT)} for diff.png")

@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "End ADB?",
   "ui.end": "End",
   "ui.useAddress": "Click to use this address",
-  "footer.createdBy": "Created with love by KB"
+  "footer.createdBy": "Created with love by KB",
+  "settings.title": "Settings",
+  "advanced.title": "Advanced settings",
+  "device.disconnect": "Disconnect",
+  "device.emptyTitle": "Connect your phone",
+  "device.emptyBody": "Plug in over USB or pair over Wi-Fi to begin.",
+  "device.live": "Streaming",
+  "device.modeNote": "Changes apply the next time you start a session.",
+  "settings.appearance": "Appearance",
+  "settings.cardSub": "Display, video and input controls.",
+  "settings.inputGroup": "Input & audio",
+  "device.select": "Select device"
 }

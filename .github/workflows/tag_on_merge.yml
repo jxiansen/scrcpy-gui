@@ -6,14 +6,15 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   tag:
-    # Only run when a version-bump PR is merged (not just closed)
+    # Only run when a version-bump PR is merged (not just closed).
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'chore/version-bump-v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -25,16 +26,21 @@ jobs:
         id: get_version
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' rune-app/Cargo.toml | head -1)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Git Config
+      - name: Git config
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create and Push Tag
+      # A tag is immutable release history: never force-push or overwrite one.
+      - name: Create and push tag (never overwrite)
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          git tag -f "v${{ env.VERSION }}" HEAD
-          git push origin "v${{ env.VERSION }}" --force
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Tag v${VERSION} already exists; refusing to overwrite it."
+            exit 1
+          fi
+          git tag "v${VERSION}" HEAD
+          git push origin "v${VERSION}"

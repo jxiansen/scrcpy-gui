@@ -14,7 +14,8 @@ no webview, no Node.js build step and no mocked backend.
 
 ## Features
 
-- Native GPU UI with the official Rune/OpenCode theme, light/dark/system appearance
+- Native GPU UI with the official Rune/OpenCode theme, light/dark/system appearance,
+  a device-first flat shell, fixed action bar and settings drawer
 - USB and wireless device discovery, Android 11+ pairing, Wi-Fi reconnect
 - Screen mirroring, camera (webcam) and virtual-display desktop sessions
 - Bitrate / FPS / resolution / codec / renderer / hardware-decoding controls
@@ -31,18 +32,24 @@ Read [GUIDE.md](GUIDE.md) for device setup (USB debugging, wireless pairing).
 
 ### Development
 
-Requires Rust 1.99.1 (pinned in `rust-toolchain.toml`) and the platform UI
-libraries (X11/Wayland/ALSA on Linux, Visual Studio C++ build tools on Windows).
+Requires Rust 1.99.1 (pinned in `rust-toolchain.toml`), Python 3.11+ (standard
+library only) and the platform UI libraries (X11/Wayland/ALSA on Linux,
+Visual Studio C++ build tools on Windows).
 
 ```bash
+python scripts/check.py                      # full gate: fmt, clippy, tests, visual
+python scripts/check.py --fast               # Rust + consistency checks only
 cargo run -p scrcpy-gui                      # launch the native app
-cargo test -p scrcpy-gui                     # backend unit tests
-cargo clippy --all-targets -- -D warnings    # CI lint
-cargo run -q -p scrcpy-gui -- --snap out.png --tree tree.json   # headless UI check
 cargo build --release -p scrcpy-gui          # release binary
+cargo run -q -p scrcpy-gui -- --snap out.png --tree tree.json   # headless UI check
 ```
 
+`scripts/check.py` is the single gate definition used by both developers and
+CI. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow: visual
+baselines, i18n catalogs, Rune upgrades, version bumps and releases.
+
 Rune is pre-release: the workspace root pins a specific `dev` revision and its
-required `[patch.crates-io]` forks. Keep both in sync when upgrading Rune.
+required `[patch.crates-io]` forks. Keep all eleven pins in sync when upgrading
+Rune (`scripts/check.py` enforces it).
 
 Architecture details and known gaps are documented in [AGENTS.md](AGENTS.md).

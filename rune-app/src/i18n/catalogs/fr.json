@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "End ADB?",
   "ui.end": "End",
   "ui.useAddress": "Click to use this address",
-  "footer.createdBy": "Created with love by KB"
+  "footer.createdBy": "Created with love by KB",
+  "settings.title": "Paramètres",
+  "advanced.title": "Paramètres avancés",
+  "device.disconnect": "Déconnecter",
+  "device.emptyTitle": "Connectez votre téléphone",
+  "device.emptyBody": "Branchez en USB ou associez en Wi-Fi pour commencer.",
+  "device.live": "Diffusion en cours",
+  "device.modeNote": "Les modifications s'appliquent au prochain démarrage.",
+  "settings.appearance": "Apparence",
+  "settings.cardSub": "Affichage, vidéo et contrôles d'entrée.",
+  "settings.inputGroup": "Entrée et audio",
+  "device.select": "Sélectionner un appareil"
 }

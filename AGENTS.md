@@ -7,25 +7,35 @@ Node toolchain, and no mocked backend.
 
 ## Commands
 
+- `python scripts/check.py` — the single full gate: fmt, clippy, `--locked`
+  tests/build, repo consistency checks, i18n catalogs, all six structural
+  fixture scenes and PNG goldens. CI runs this on Windows and
+  `check.py --no-golden` on Linux. `--fast` skips visual layers,
+  `--visual-only` skips Rust checks, `--scene NAME` limits the structural run.
 - `cargo run -p scrcpy-gui` — run the real app (opens a native window).
 - `cargo run -q -p scrcpy-gui -- --snap out.png --tree tree.json` — Rune headless
   render; use it to check layout without a display.
 - `cargo test -p scrcpy-gui` — Rust unit tests (scrcpy argument building, ADB
   parsing, download helpers).
 - `cargo clippy --all-targets -- -D warnings` and `cargo fmt --all -- --check` —
-  CI checks.
+  CI checks (also covered by `check.py`).
 - `cargo build --release -p scrcpy-gui` — release binary.
-- `python scripts/visual_tree_check.py compare-dark` — structural visual gate:
-  renders a deterministic fixture scene and asserts the rune-kit shell, pane
-  geometry and key controls from Rune's `--tree`. Scenes: `compare-dark`,
-  `compare-light`, `compare-camera`, `compare-desktop`, `compare-en`,
-  `compare-empty`.
+- `python scripts/visual_tree_check.py [scene]` — structural visual gate;
+  defaults to all six scenes (`compare-dark`, `compare-light`,
+  `compare-camera`, `compare-desktop`, `compare-en`, `compare-empty`), `--list`
+  lists them. Asserts the flat shell, device head, settings card, action bar,
+  console and the settings/advanced/console drawer states from Rune's `--tree`.
 - `python scripts/visual_image_check.py` — golden PNG regression (use `--bless`
-  to update goldens); `python scripts/visual_diff.py A.png B.png` — generic PNG
-  diff. See `tests/visual/README.md` for the old-vs-new differential procedure.
+  on Windows to update goldens); `python scripts/visual_diff.py A.png B.png` —
+  generic PNG diff. See `tests/visual/README.md` for the old-vs-new procedure.
+- `python scripts/check_i18n.py` — locale catalog consistency against `en.json`.
+- `python scripts/bump_version.py patch|minor|major` — bump the version in both
+  `Cargo.toml` and `Cargo.lock`; `--dry-run` previews it.
 
 Rust 1.99.1 is pinned in `rust-toolchain.toml` (Rune requires it). Do not bump
-the `windows` crate independently of Rune's patched dependency set.
+the `windows` crate independently of Rune's patched dependency set. Engineering
+conventions, CI layout and release steps are in `CONTRIBUTING.md`; add new
+checks to `scripts/check.py`, never to a workflow alone.
 
 ## Architecture
 
@@ -43,11 +53,13 @@ the `windows` crate independently of Rune's patched dependency set.
 - `rune-app/src/ui/state.rs`: `Ui` state + async bridge. Async commands run on a
   tokio runtime; results and backend events go through an unbounded channel,
   `EventSink` wakes Rune, and `Ui::poll` applies changes on the UI thread.
-- `rune-app/src/ui/kit.rs`: the rune-kit shell (`App::titlebar` + `SplitView`
-  sidebar/main/inspector + `Toolbar`), the official OpenCode theme and the form
-  controls; custom pieces are the console, file-drop target and scrcpy icons.
-- `rune-app/src/ui/state.rs` holds `PaneState`s, appearance (`color_mode`),
-  `panel_on_top`, `connect_open`/`about_open`, and the async bridge.
+- `rune-app/src/ui/kit.rs`: the flat shell (custom titlebar row, fixed `Sidebar`
+  rail, scrollable main, right settings drawer), the official OpenCode theme and
+  the rune-kit fields/buttons; custom pieces are the action bar, console,
+  file-drop target and scrcpy icons.
+- `rune-app/src/ui/state.rs` holds the selected device, appearance
+  (`color_mode`), `panel_on_top`, `connect_open`/`about_open`,
+  `settings_open`/`advanced_open`/`console_open`, and the async bridge.
 - `rune-app/src/platform/`: global shortcut handlers and the Windows-only
   borderless-window drag hook (previously `grab.rs` + Tauri shortcuts plugin).
 - `rune-app/src/i18n.rs` + `catalogs/`: all eight locales exported verbatim from
@@ -76,14 +88,13 @@ Backend events keep their old names so the ported logic stays recognisable:
   closing the window leaves the process in the notification area; the tray Quit
   calls `on_quit`, which kills scrcpy children synchronously. macOS has no tray in
   this Rune rev; Linux gets one only where a tray host runs.
-- The appearance card's pin sets the GUI window's `panel_on_top` via
+- The Settings > Appearance pin sets the GUI window's `panel_on_top` via
   `WindowHandle::set_always_on_top`; it is unrelated to scrcpy's
   `config.always_on_top` (`--always-on-top`). Taskbar Busy/badge state is pushed
   from `Ui::poll` through `WindowHandle::set_taskbar`.
 - The GUI window's place is saved under the `window` Prefs key on `on_close` /
   `on_quit` and restored in `on_ready`; sizes are physical, `resize_instant`
-  takes the logical size back. `LiveRegion::Polite` is on the header status and
-  the newest log line.
+  takes the logical size back. `LiveRegion::Polite` is on the newest log line.
 - Binary lookup order: custom folder → `scrcpy-bin/` beside the exe → `scrcpy-bin/`
   in the working directory → `PATH`. `adb` and `scrcpy-server` sit beside `scrcpy`.
 - `download_scrcpy` still verifies `SHA256SUMS.txt` before extracting. Keep it.

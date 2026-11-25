@@ -1,21 +1,11 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  # The workspace root is the only Cargo manifest left (src-tauri was removed).
+  - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
-    groups:
-      npm-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - minor
-          - patch
-
-  - package-ecosystem: cargo
-    directory: /src-tauri
-    schedule:
-      interval: weekly
+    open-pull-requests-limit: 5
     groups:
       cargo-minor-patch:
         patterns:
@@ -23,8 +13,18 @@ updates:
         update-types:
           - minor
           - patch
+    # Rune's three git dependencies and the eight [patch.crates-io] forks are
+    # pinned to one dev revision and cannot be managed by dependabot. Upgrade
+    # them manually; scripts/check.py enforces that all eleven revs stay equal.
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

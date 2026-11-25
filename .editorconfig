@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{json,yml,yaml,toml,md}]
+indent_size = 2
+
+[*.{rs,py,yml,yaml,toml}]
+end_of_line = lf
+
+[*.md]
+trim_trailing_whitespace = false
+
+# The eight locale catalogs are historically CRLF. Keep them that way for now:
+# a mass line-ending conversion would bury in-flight translation edits. Do the
+# renorm in one dedicated commit when no catalog edits are pending.
+[rune-app/src/i18n/catalogs/*.json]
+end_of_line = crlf

@@ -66,6 +66,10 @@ svg_icon!(
     r#"<rect x="1.5" y="2.5" width="13" height="9" rx="1" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M3 13 13 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>"#
 );
 svg_icon!(
+    SLIDERS,
+    r#"<path d="M2 4.5h4M9 4.5h5M2 11.5h7M12 11.5h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/><circle cx="7" cy="4.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="10.5" cy="11.5" r="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/>"#
+);
+svg_icon!(
     PIN,
     r#"<path d="M5 2h6M6.4 2v2.3c0 .6-.3 1.2-.8 1.6l-.9.7c-.5.4-.3 1.2.3 1.2h6c.6 0 .8-.8.3-1.2l-.9-.7c-.5-.4-.8-1-.8-1.6V2" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M8 8.1v5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#
 );

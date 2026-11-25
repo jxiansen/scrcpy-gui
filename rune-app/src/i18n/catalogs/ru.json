@@ -290,5 +290,16 @@
   "ui.confirmEndAdb": "End ADB?",
   "ui.end": "End",
   "ui.useAddress": "Click to use this address",
-  "footer.createdBy": "Created with love by KB"
+  "footer.createdBy": "Created with love by KB",
+  "settings.title": "Настройки",
+  "advanced.title": "Дополнительные настройки",
+  "device.disconnect": "Отключить",
+  "device.emptyTitle": "Подключите телефон",
+  "device.emptyBody": "Подключите по USB или сопрягите по Wi-Fi.",
+  "device.live": "Идёт трансляция",
+  "device.modeNote": "Изменения применятся при следующем запуске.",
+  "settings.appearance": "Внешний вид",
+  "settings.cardSub": "Изображение, кодирование и ввод.",
+  "settings.inputGroup": "Ввод и звук",
+  "device.select": "Выберите устройство"
 }

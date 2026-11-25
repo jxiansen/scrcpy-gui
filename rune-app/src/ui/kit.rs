@@ -4,12 +4,12 @@
 //! the OpenCode theme. The console, file drop zone and scrcpy-specific icons stay
 //! custom because the kit has no equivalent.
 
-use rune::{Color, Cx, El, LiveRegion, ScrollSpec, col, el, row, text};
+use rune::{Cx, El, LiveRegion, ScrollSpec, col, el, row, text};
 use rune_kit::glyphs;
 use rune_kit::{
-    Button, ButtonVariant, Card, ControlSize, Dialog, Field, Kit, Menu, MenuItem, SegmentedControl,
-    Select, Sidebar, SidebarHeader, SidebarRow, SidebarSection, Slider, Spinner, SplitView, Switch,
-    TextInput, Toast, ToastRegion, Toolbar, root,
+    Button, ButtonVariant, ControlSize, Dialog, Field, IconButton, IconButtonVariant, Keybind, Kit,
+    SegmentedControl, Select, Sidebar, SidebarHeader, SidebarRow, SidebarSection, Slider, Spinner,
+    Switch, TextInput, Toast, ToastRegion, root,
 };
 use rune_theme_opencode as theme;
 
@@ -158,52 +158,55 @@ fn field(label: &str, control: El, k: &Kit) -> El {
 }
 
 fn cell(content: El) -> El {
-    col().grow(1.0).min_w(210.0).child(content)
-}
-
-/// A narrower cell for camera/desktop, whose five engine fields fit three per row.
-fn cell_compact(content: El) -> El {
-    col().grow(1.0).min_w(128.0).child(content)
+    col().grow(1.0).min_w(300.0).child(content)
 }
 
 fn grid(fields: Vec<El>) -> El {
-    row().w_full().gap(12.0).flex_wrap().children(fields)
+    row().w_full().gap(16.0).flex_wrap().children(fields)
 }
 
-fn switch_row(s: &Ui, k: &Kit, label: &str, on: bool, f: impl Fn(&mut Ui) + 'static) -> El {
-    let _ = s;
-    Switch::new(on).label(label).on_toggle(f).build(k)
+/// A settings row: 13/20 label with the 36x16 switch at the trailing edge.
+fn switch_row(k: &Kit, label: &str, on: bool, f: impl Fn(&mut Ui) + 'static) -> El {
+    row()
+        .w_full()
+        .h(28.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(label.to_string())
+                .font(k.ty.ui)
+                .color(k.c.text_base)
+                .grow(1.0)
+                .shrink()
+                .truncate(),
+        )
+        .child(
+            Switch::new(on)
+                .label(label)
+                .hide_label()
+                .on_toggle(f)
+                .build(k),
+        )
 }
 
 fn labeled_slider(k: &Kit, label: &str, value: String, slider: El) -> El {
     col()
         .w_full()
-        .gap(4.0)
+        .gap(8.0)
         .child(
             row()
                 .w_full()
                 .gap(8.0)
                 .center_y()
-                .child(text(label).font(k.ty.small).color(k.c.text_base))
+                .child(text(label).font(k.ty.ui_medium).color(k.c.text_base))
                 .child(row().grow(1.0))
                 .child(text(value).font(k.ty.small).color(k.c.text_muted)),
         )
         .child(slider)
 }
 
-fn section_card(
-    k: &Kit,
-    key: &str,
-    title: &str,
-    icon: Option<&'static rune::Icon>,
-    body: Vec<El>,
-) -> El {
-    let mut card = Card::new().title(title, icon);
-    for child in body {
-        card = card.child(child);
-    }
-    card.build(k).key(key)
-}
+const SELECT_W: f32 = 340.0;
+const SLIDER_W: f32 = 300.0;
 
 fn folder_button(
     _s: &Ui,
@@ -231,130 +234,6 @@ fn folder_button(
             );
         })
         .build(k)
-}
-
-fn engine_fields(s: &Ui, k: &Kit, layer: &mut Vec<El>, with_res: bool, compact: bool) -> Vec<El> {
-    let sel_w = if compact { 128.0 } else { 210.0 };
-    let wrap = |content: El| {
-        if compact {
-            cell_compact(content)
-        } else {
-            cell(content)
-        }
-    };
-    let fps = s
-        .config
-        .fps
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "Auto".into());
-    let mut fields = Vec::new();
-    if with_res {
-        fields.push(wrap(field(
-            tr(s, "controlPanel.resolution"),
-            select_control(
-                s,
-                k,
-                layer,
-                "res",
-                RES,
-                s.config.res.as_deref().unwrap_or("0"),
-                tr(s, "controlPanel.resolution"),
-                sel_w,
-            ),
-            k,
-        )));
-    }
-    fields.push(wrap(field(
-        tr(s, "controlPanel.fps"),
-        select_control(
-            s,
-            k,
-            layer,
-            "fps",
-            FPS,
-            &fps,
-            tr(s, "controlPanel.fps"),
-            sel_w,
-        ),
-        k,
-    )));
-    fields.push(wrap(field(
-        tr(s, "controlPanel.rotation"),
-        select_control(
-            s,
-            k,
-            layer,
-            "rotation",
-            ROT,
-            s.config.rotation.as_deref().unwrap_or("0"),
-            tr(s, "controlPanel.rotation"),
-            sel_w,
-        ),
-        k,
-    )));
-    fields.push(wrap(field(
-        tr(s, "controlPanel.codec"),
-        select_control(
-            s,
-            k,
-            layer,
-            "codec",
-            CODEC,
-            s.config.codec.as_deref().unwrap_or("h264"),
-            tr(s, "controlPanel.codec"),
-            sel_w,
-        ),
-        k,
-    )));
-    fields.push(wrap(field(
-        tr(s, "controlPanel.graphicsRenderer"),
-        select_control(
-            s,
-            k,
-            layer,
-            "renderer",
-            RENDERERS,
-            s.config.render_driver.as_deref().unwrap_or("Auto"),
-            tr(s, "controlPanel.graphicsRenderer"),
-            sel_w,
-        ),
-        k,
-    )));
-    fields.push(wrap(field(
-        tr(s, "controlPanel.hardwareDecoding"),
-        select_control(
-            s,
-            k,
-            layer,
-            "hwdec",
-            HWDEC,
-            s.config.hwdec.as_deref().unwrap_or("auto"),
-            tr(s, "controlPanel.hardwareDecoding"),
-            sel_w,
-        ),
-        k,
-    )));
-    fields
-}
-
-fn bitrate(s: &Ui, k: &Kit) -> El {
-    let slider = Slider::new("bitrate", s.config.bitrate.unwrap_or(8) as f32)
-        .range(1.0..=50.0)
-        .step(1.0)
-        .label(tr(s, "controlPanel.bitrate"))
-        .hide_label()
-        .width(420.0)
-        .on_change(|s: &mut Ui, v, _| {
-            s.config.bitrate = Some(v.round() as u32);
-            s.save_config();
-        })
-        .build(k);
-    labeled_slider(
-        k,
-        tr(s, "controlPanel.bitrate"),
-        format!("{} Mbps", s.config.bitrate.unwrap_or(8)),
-        slider,
-    )
 }
 
 fn background_color(s: &Ui, k: &Kit, tr: &dyn Fn(&str) -> &'static str) -> El {
@@ -398,144 +277,392 @@ fn background_color(s: &Ui, k: &Kit, tr: &dyn Fn(&str) -> &'static str) -> El {
         )
 }
 
-fn mirror_config(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
-    let mut body = Vec::new();
-    body.push(
-        col()
-            .gap(8.0)
-            .child(
-                text(tr(s, "controlPanel.inputEnhancements"))
-                    .font(k.ty.small_medium)
-                    .color(k.c.text_muted),
-            )
-            .child(
-                text(tr(s, "controlPanel.inputEnhancementsDescription"))
-                    .font(k.ty.small)
-                    .color(k.c.text_faint)
-                    .wrap(),
-            )
-            .child(row().gap(16.0).flex_wrap().children([
-                switch_row(
-                    s,
-                    k,
-                    tr(s, "controlPanel.hidKeyboard"),
-                    s.config.hid_keyboard.unwrap_or(false),
-                    |s| {
-                        flip(&mut s.config.hid_keyboard, false);
-                        s.save_config();
-                    },
-                ),
-                switch_row(
-                    s,
-                    k,
-                    tr(s, "controlPanel.hidMouse"),
-                    s.config.hid_mouse.unwrap_or(false),
-                    |s| {
-                        flip(&mut s.config.hid_mouse, false);
-                        s.save_config();
-                    },
-                ),
-                switch_row(
-                    s,
-                    k,
-                    tr(s, "controlPanel.pureHid"),
-                    s.config.otg_pure.unwrap_or(false),
-                    |s| {
-                        flip(&mut s.config.otg_pure, false);
-                        s.save_config();
-                    },
-                ),
-            ])),
-    );
-    body.push(grid(engine_fields(s, k, layer, true, false)));
-    body.push(row().gap(24.0).flex_wrap().children([
-        switch_row(
-            s,
-            k,
-            tr(s, "controlPanel.vsync"),
-            s.config.vsync.unwrap_or(true),
-            |s| {
-                flip(&mut s.config.vsync, true);
-                s.save_config();
-            },
-        ),
-        switch_row(
-            s,
-            k,
-            tr(s, "controlPanel.ignoreEncoderConstraints"),
-            s.config.ignore_video_encoder_constraints.unwrap_or(false),
-            |s| {
-                flip(&mut s.config.ignore_video_encoder_constraints, false);
-                s.save_config();
-            },
-        ),
-    ]));
-    body.push(bitrate(s, k));
-    body.into_iter()
-        .fold(col().w_full().gap(12.0), |c, child| c.child(child))
-}
-
-fn camera_config(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
-    let mut body = Vec::new();
-    body.push(
-        col()
-            .gap(4.0)
-            .padding(12.0)
-            .radius(k.radius.md)
-            .fill(k.c.layer_01)
-            .child(
-                text(tr(s, "controlPanel.webcamProTip"))
-                    .font(k.ty.small_medium)
-                    .color(k.c.text_accent),
-            )
-            .child(
-                text(format!(
-                    "{} {} {} {} {}",
-                    tr(s, "controlPanel.webcamProTipTextBefore"),
-                    tr(s, "controlPanel.webcamProTipObs"),
-                    tr(s, "controlPanel.webcamProTipAndStart"),
-                    tr(s, "controlPanel.webcamProTipVirtualCamera"),
-                    tr(s, "controlPanel.webcamProTipTextAfter")
-                ))
-                .font(k.ty.small)
+fn flat_card(k: &Kit, title: &str, icon: &'static rune::Icon, sub: &str, body: El) -> El {
+    let head = row()
+        .key("title")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .child(rune::icon(icon, 14.0).color(k.c.icon_base))
+        .child(
+            text(title.to_string())
+                .font(k.ty.body_medium)
+                .color(k.c.text_base),
+        );
+    let inner = col()
+        .grow(1.0)
+        .shrink()
+        .pt(10.0)
+        .pb(10.0)
+        .pl(8.0)
+        .pr(12.0)
+        .child(head)
+        .child(
+            text(sub.to_string())
+                .font(k.ty.body)
                 .color(k.c.text_muted)
                 .wrap(),
-            ),
-    );
-    body.push(grid(vec![
-        cell(field(
-            tr(s, "controlPanel.cameraDevice"),
-            select_control(
+        )
+        .child(col().w_full().mt(10.0).gap(12.0).child(body));
+    row()
+        .key("settings-card")
+        .w_full()
+        .items_stretch()
+        .mt(16.0)
+        .child(el().w(2.0).mt(8.0).mb(8.0).radius(2.0).fill(k.c.icon_base))
+        .child(inner)
+}
+
+fn section_heading(k: &Kit, title: &str) -> El {
+    text(title.to_string())
+        .font(k.ty.small_medium)
+        .color(k.c.text_faint)
+}
+
+fn select_field(
+    s: &Ui,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    key: &'static str,
+    options: &[&str],
+    current: &str,
+    label: &'static str,
+) -> El {
+    field(
+        tr(s, label),
+        select_control(s, k, layer, key, options, current, tr(s, label), SELECT_W),
+        k,
+    )
+}
+
+fn bitrate_field(s: &Ui, k: &Kit) -> El {
+    let slider = Slider::new("bitrate", s.config.bitrate.unwrap_or(8) as f32)
+        .range(1.0..=50.0)
+        .step(1.0)
+        .label(tr(s, "controlPanel.bitrate"))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(|s: &mut Ui, v, _| {
+            s.config.bitrate = Some(v.round() as u32);
+            s.save_config();
+        })
+        .build(k);
+    labeled_slider(
+        k,
+        tr(s, "controlPanel.bitrate"),
+        format!("{} Mbps", s.config.bitrate.unwrap_or(8)),
+        slider,
+    )
+}
+
+fn zoom_field(s: &Ui, k: &Kit) -> El {
+    let value = s.config.camera_zoom.unwrap_or(1.0);
+    let slider = Slider::new("zoom", value)
+        .range(1.0..=5.0)
+        .step(0.1)
+        .label(tr(s, "controlPanel.cameraZoom"))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(|s: &mut Ui, v, _| {
+            s.config.camera_zoom = Some(v);
+            s.save_config();
+        })
+        .build(k);
+    labeled_slider(
+        k,
+        tr(s, "controlPanel.cameraZoom"),
+        format!("{value:.1}x"),
+        slider,
+    )
+}
+
+fn dimension_slider(
+    s: &Ui,
+    k: &Kit,
+    key: &'static str,
+    label: &'static str,
+    value: u32,
+    range: std::ops::RangeInclusive<f32>,
+    unit: &'static str,
+    set: fn(&mut Ui, u32),
+) -> El {
+    let slider = Slider::new(key, value as f32)
+        .range(range)
+        .step(10.0)
+        .label(tr(s, label))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(move |s: &mut Ui, v, _| {
+            set(s, v.round() as u32);
+            s.save_config();
+        })
+        .build(k);
+    labeled_slider(k, tr(s, label), format!("{value}{unit}"), slider)
+}
+
+fn essential_fields(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
+    match s.tab {
+        SessionKind::Mirror => vec![
+            cell(select_field(
+                s,
+                k,
+                layer,
+                "res",
+                RES,
+                s.config.res.as_deref().unwrap_or("0"),
+                "controlPanel.resolution",
+            )),
+            cell(select_field(
+                s,
+                k,
+                layer,
+                "fps",
+                FPS,
+                &s.config
+                    .fps
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "Auto".into()),
+                "controlPanel.fps",
+            )),
+            cell(bitrate_field(s, k)),
+            cell(select_field(
+                s,
+                k,
+                layer,
+                "codec",
+                CODEC,
+                s.config.codec.as_deref().unwrap_or("h264"),
+                "controlPanel.codec",
+            )),
+        ],
+        SessionKind::Camera => vec![
+            cell(select_field(
                 s,
                 k,
                 layer,
                 "lens",
                 LENSES,
                 s.config.camera_id.as_deref().unwrap_or("Auto Select"),
-                tr(s, "controlPanel.cameraDevice"),
-                200.0,
-            ),
-            k,
-        )),
-        cell(field(
-            tr(s, "controlPanel.aspect"),
-            select_control(
+                "controlPanel.cameraDevice",
+            )),
+            cell(select_field(
                 s,
                 k,
                 layer,
                 "aspect",
                 ASPECT,
                 s.config.camera_ar.as_deref().unwrap_or("0"),
-                tr(s, "controlPanel.aspect"),
-                160.0,
-            ),
-            k,
-        )),
-    ]));
-    body.push(
-        row().gap(20.0).flex_wrap().children([
-            switch_row(
+                "controlPanel.aspect",
+            )),
+            cell(zoom_field(s, k)),
+            cell(select_field(
                 s,
+                k,
+                layer,
+                "fps",
+                FPS,
+                &s.config
+                    .fps
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "Auto".into()),
+                "controlPanel.fps",
+            )),
+        ],
+        SessionKind::Desktop => vec![
+            cell(dimension_slider(
+                s,
+                k,
+                "vdWidth",
+                "controlPanel.width",
+                s.config.vd_width.unwrap_or(1920),
+                480.0..=3840.0,
+                " px",
+                |s, v| s.config.vd_width = Some(v),
+            )),
+            cell(dimension_slider(
+                s,
+                k,
+                "vdHeight",
+                "controlPanel.height",
+                s.config.vd_height.unwrap_or(1080),
+                360.0..=2160.0,
+                " px",
+                |s, v| s.config.vd_height = Some(v),
+            )),
+            cell(dimension_slider(
+                s,
+                k,
+                "vdDpi",
+                "controlPanel.uiScaling",
+                s.config.vd_dpi.unwrap_or(420),
+                120.0..=640.0,
+                "",
+                |s, v| s.config.vd_dpi = Some(v),
+            )),
+            cell(select_field(
+                s,
+                k,
+                layer,
+                "preset",
+                PRESETS,
+                preset_name(
+                    s.config.vd_width.unwrap_or(1920),
+                    s.config.vd_height.unwrap_or(1080),
+                ),
+                "controlPanel.quickPresets",
+            )),
+        ],
+    }
+}
+
+fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
+    let mut fields = Vec::new();
+    if matches!(s.tab, SessionKind::Desktop) {
+        fields.push(cell(select_field(
+            s,
+            k,
+            layer,
+            "fps",
+            FPS,
+            &s.config
+                .fps
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "Auto".into()),
+            "controlPanel.fps",
+        )));
+    }
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "rotation",
+        ROT,
+        s.config.rotation.as_deref().unwrap_or("0"),
+        "controlPanel.rotation",
+    )));
+    if !matches!(s.tab, SessionKind::Desktop) {
+        fields.push(cell(select_field(
+            s,
+            k,
+            layer,
+            "codec",
+            CODEC,
+            s.config.codec.as_deref().unwrap_or("h264"),
+            "controlPanel.codec",
+        )));
+    }
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "renderer",
+        RENDERERS,
+        s.config.render_driver.as_deref().unwrap_or("Auto"),
+        "controlPanel.graphicsRenderer",
+    )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "hwdec",
+        HWDEC,
+        s.config.hwdec.as_deref().unwrap_or("auto"),
+        "controlPanel.hardwareDecoding",
+    )));
+    fields
+}
+
+fn advanced_switches(s: &Ui, k: &Kit) -> El {
+    let mut cells = Vec::new();
+    cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+        k,
+        tr(s, "controlPanel.vsync"),
+        s.config.vsync.unwrap_or(true),
+        |s| {
+            flip(&mut s.config.vsync, true);
+            s.save_config();
+        },
+    )));
+    cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+        k,
+        tr(s, "controlPanel.ignoreEncoderConstraints"),
+        s.config.ignore_video_encoder_constraints.unwrap_or(false),
+        |s| {
+            flip(&mut s.config.ignore_video_encoder_constraints, false);
+            s.save_config();
+        },
+    )));
+    if matches!(s.tab, SessionKind::Desktop) {
+        cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+            k,
+            tr(s, "controlPanel.flexDisplay"),
+            s.config.flex_display.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.flex_display, false);
+                s.save_config();
+            },
+        )));
+    }
+    row().w_full().gap(16.0).flex_wrap().children(cells)
+}
+
+fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut content = col()
+        .w_full()
+        .gap(12.0)
+        .child(grid(advanced_selects(s, k, layer)));
+    if matches!(s.tab, SessionKind::Desktop) {
+        content = content
+            .child(bitrate_field(s, k))
+            .child(background_color(s, k, &|key| tr(s, key)));
+    } else if matches!(s.tab, SessionKind::Camera) {
+        content = content.child(bitrate_field(s, k));
+    }
+    content.child(advanced_switches(s, k))
+}
+
+fn advanced_count(s: &Ui) -> usize {
+    match s.tab {
+        SessionKind::Mirror => 6,
+        SessionKind::Camera => 7,
+        SessionKind::Desktop => 10,
+    }
+}
+
+fn input_switches(s: &Ui, k: &Kit) -> El {
+    let mut cells = Vec::new();
+    match s.tab {
+        SessionKind::Mirror => {
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "controlPanel.hidKeyboard"),
+                s.config.hid_keyboard.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.hid_keyboard, false);
+                    s.save_config();
+                },
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "controlPanel.hidMouse"),
+                s.config.hid_mouse.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.hid_mouse, false);
+                    s.save_config();
+                },
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "controlPanel.pureHid"),
+                s.config.otg_pure.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.otg_pure, false);
+                    s.save_config();
+                },
+            )));
+        }
+        SessionKind::Camera => {
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
                 k,
                 tr(s, "controlPanel.cameraTorch"),
                 s.config.camera_torch.unwrap_or(false),
@@ -543,199 +670,360 @@ fn camera_config(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                     flip(&mut s.config.camera_torch, false);
                     s.save_config();
                 },
-            ),
-            labeled_slider(
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
                 k,
-                tr(s, "controlPanel.cameraZoom"),
-                format!("{:.1}x", s.config.camera_zoom.unwrap_or(1.0)),
-                Slider::new("zoom", s.config.camera_zoom.unwrap_or(1.0))
-                    .range(1.0..=5.0)
-                    .step(0.1)
-                    .label(tr(s, "controlPanel.cameraZoom"))
-                    .hide_label()
-                    .width(300.0)
-                    .on_change(|s: &mut Ui, v, _| {
-                        s.config.camera_zoom = Some(v);
-                        s.save_config();
-                    })
-                    .build(k),
-            ),
-        ]),
-    );
-    body.push(grid(engine_fields(s, k, layer, false, true)));
-    body.push(bitrate(s, k));
-    body.into_iter()
-        .fold(col().w_full().gap(12.0), |c, child| c.child(child))
-}
-
-fn desktop_config(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
-    let mut body = Vec::new();
-    body.push(grid(vec![
-        cell(labeled_slider(
-            k,
-            tr(s, "controlPanel.width"),
-            s.config.vd_width.unwrap_or(1920).to_string(),
-            Slider::new("vdWidth", s.config.vd_width.unwrap_or(1920) as f32)
-                .range(480.0..=3840.0)
-                .step(10.0)
-                .label(tr(s, "controlPanel.width"))
-                .hide_label()
-                .width(200.0)
-                .on_change(|s: &mut Ui, v, _| {
-                    s.config.vd_width = Some(v.round() as u32);
+                tr(s, "sessionBehavior.forwardAudio"),
+                s.config.audio_enabled.unwrap_or(true),
+                |s| {
+                    flip(&mut s.config.audio_enabled, true);
                     s.save_config();
-                })
-                .build(k),
-        )),
-        cell(labeled_slider(
-            k,
-            tr(s, "controlPanel.height"),
-            s.config.vd_height.unwrap_or(1080).to_string(),
-            Slider::new("vdHeight", s.config.vd_height.unwrap_or(1080) as f32)
-                .range(360.0..=2160.0)
-                .step(10.0)
-                .label(tr(s, "controlPanel.height"))
-                .hide_label()
-                .width(200.0)
-                .on_change(|s: &mut Ui, v, _| {
-                    s.config.vd_height = Some(v.round() as u32);
-                    s.save_config();
-                })
-                .build(k),
-        )),
-    ]));
-    body.push(grid(vec![
-        cell(labeled_slider(
-            k,
-            tr(s, "controlPanel.uiScaling"),
-            s.config.vd_dpi.unwrap_or(420).to_string(),
-            Slider::new("vdDpi", s.config.vd_dpi.unwrap_or(420) as f32)
-                .range(120.0..=640.0)
-                .step(10.0)
-                .label(tr(s, "controlPanel.uiScaling"))
-                .hide_label()
-                .width(200.0)
-                .on_change(|s: &mut Ui, v, _| {
-                    s.config.vd_dpi = Some(v.round() as u32);
-                    s.save_config();
-                })
-                .build(k),
-        )),
-        cell(field(
-            tr(s, "controlPanel.quickPresets"),
-            select_control(
-                s,
+                },
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
                 k,
-                layer,
-                "preset",
-                PRESETS,
-                preset_name(
-                    s.config.vd_width.unwrap_or(0),
-                    s.config.vd_height.unwrap_or(0),
-                ),
-                tr(s, "controlPanel.quickPresets"),
-                200.0,
-            ),
-            k,
-        )),
-    ]));
-    body.push(grid(engine_fields(s, k, layer, false, true)));
-    body.push(switch_row(
-        s,
-        k,
-        tr(s, "controlPanel.flexDisplay"),
-        s.config.flex_display.unwrap_or(false),
-        |s| {
-            flip(&mut s.config.flex_display, false);
-            s.save_config();
-        },
-    ));
-    body.push(bitrate(s, k));
-    body.push(background_color(s, k, &|key| tr(s, key)));
-    body.into_iter()
-        .fold(col().w_full().gap(12.0), |c, child| c.child(child))
-}
-
-fn console(s: &Ui, k: &Kit) -> El {
-    let mut logs = col().key("console-lines").gap(2.0);
-    for (i, (time, line)) in s.logs.iter().enumerate() {
-        let mut entry = row().key(format!("log-{i}")).gap(12.0);
-        if i + 1 == s.logs.len() {
-            entry = entry.live_region(LiveRegion::Polite);
+                tr(s, "sessionBehavior.stayAwake"),
+                s.config.stay_awake.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.stay_awake, false);
+                    s.save_config();
+                },
+            )));
         }
-        logs = logs.child(
-            entry
-                .child(text(time.clone()).font(k.ty.mono).color(k.c.text_faint))
-                .child(
-                    text(line.clone())
-                        .font(k.ty.mono)
-                        .color(k.c.text_muted)
-                        .wrap(),
-                ),
-        );
+        SessionKind::Desktop => {
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "controlPanel.hidKeyboard"),
+                s.config.hid_keyboard.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.hid_keyboard, false);
+                    s.save_config();
+                },
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "controlPanel.hidMouse"),
+                s.config.hid_mouse.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.hid_mouse, false);
+                    s.save_config();
+                },
+            )));
+            cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+                k,
+                tr(s, "sessionBehavior.forwardAudio"),
+                s.config.audio_enabled.unwrap_or(true),
+                |s| {
+                    flip(&mut s.config.audio_enabled, true);
+                    s.save_config();
+                },
+            )));
+        }
     }
-    if s.logs.is_empty() {
-        logs = logs.child(
-            text(tr(s, "logPanel.waitingForSequence"))
-                .font(k.ty.mono)
-                .color(k.c.text_faint),
-        );
-    }
-    Card::new()
-        .title(tr(s, "logPanel.systemConsole"), Some(&glyphs::FILE_CODE))
+    row().w_full().gap(16.0).flex_wrap().children(cells)
+}
+
+fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let icon = match s.tab {
+        SessionKind::Mirror => &icons::SLIDERS,
+        SessionKind::Camera => &icons::CAMERA,
+        SessionKind::Desktop => &icons::MONITOR,
+    };
+    let mut body = col()
+        .w_full()
+        .gap(12.0)
+        .child(grid(essential_fields(s, k, layer)))
         .child(
             col()
-                .key("console-body")
+                .w_full()
                 .gap(8.0)
-                .child(
-                    row()
-                        .w_full()
-                        .gap(8.0)
-                        .child(row().grow(1.0))
-                        .child(
-                            Button::new(tr(s, "logPanel.report"))
-                                .variant(ButtonVariant::GhostMuted)
-                                .control_size(ControlSize::Small)
-                                .on_press(|s: &mut Ui| s.export_report())
-                                .build(k)
-                                .key("console-export"),
-                        )
-                        .child(
-                            Button::new(tr(s, "logPanel.clear"))
-                                .variant(ButtonVariant::GhostMuted)
-                                .control_size(ControlSize::Small)
-                                .on_press(|s: &mut Ui| s.logs.clear())
-                                .build(k)
-                                .key("console-clear"),
-                        ),
-                )
-                .child(
-                    logs.scroll(ScrollSpec { stick_bottom: true })
-                        .h(120.0)
-                        .min_h(0.0),
-                )
-                .child(
-                    TextInput::new(&s.command)
-                        .plain()
-                        .label(tr(s, "logPanel.terminalPlaceholder"))
-                        .placeholder(tr(s, "logPanel.terminalPlaceholder"))
-                        .width(None)
-                        .on_edit(|s: &mut Ui| &mut s.command)
-                        .on_submit(|s: &mut Ui, _| {
-                            let cmd = s.command.text.clone();
-                            s.run_command(cmd);
-                            s.command.replace_text("");
-                        })
-                        .build(k),
-                ),
+                .child(section_heading(k, tr(s, "settings.inputGroup")))
+                .child(input_switches(s, k)),
         )
-        .build(k)
-        .key("console")
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
+        .child(
+            Button::new(format!(
+                "{} · {}",
+                tr(s, "advanced.title"),
+                advanced_count(s)
+            ))
+            .variant(ButtonVariant::GhostMuted)
+            .control_size(ControlSize::Regular)
+            .icon(&icons::SLIDERS)
+            .expanded(s.advanced_open)
+            .on_press(|s: &mut Ui| s.advanced_open = !s.advanced_open)
+            .build(k)
+            .justify_start()
+            .key("advanced-toggle"),
+        );
+    if s.advanced_open {
+        body = body.child(advanced_content(s, k, layer));
+    }
+    flat_card(
+        k,
+        tr(s, "controlPanel.engineConfiguration"),
+        icon,
+        tr(s, "settings.cardSub"),
+        body,
+    )
 }
 
-fn main_view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+fn mode_row(s: &Ui, k: &Kit) -> El {
+    let selected = s.tab as usize;
+    let segmented = SegmentedControl::new(
+        &[
+            tr(s, "controlPanel.screen"),
+            tr(s, "controlPanel.camera"),
+            tr(s, "controlPanel.desktop"),
+        ],
+        Some(selected),
+    )
+    .label(tr(s, "controlPanel.captureSource"))
+    .width(Some(360.0))
+    .on_pick(|s: &mut Ui, i, _| {
+        s.tab = match i {
+            0 => SessionKind::Mirror,
+            1 => SessionKind::Camera,
+            _ => SessionKind::Desktop,
+        };
+        s.advanced_open = false;
+    })
+    .build(k);
+    row()
+        .key("mode-row")
+        .w_full()
+        .gap(16.0)
+        .center_y()
+        .mb(16.0)
+        .child(segmented)
+        .child(row().grow(1.0))
+        .child(
+            text(tr(s, "device.modeNote"))
+                .font(k.ty.small)
+                .color(k.c.text_faint)
+                .truncate(),
+        )
+}
+
+fn has_device(s: &Ui) -> bool {
+    !s.config.device.is_empty()
+        && (s.devices.iter().any(|d| d.serial == s.config.device)
+            || s.running.contains_key(&s.config.device))
+}
+
+fn device_badge(k: &Kit, label: &str) -> El {
+    row()
+        .h(20.0)
+        .px(7.0)
+        .gap(5.0)
+        .center_y()
+        .radius(4.0)
+        .fill(k.c.success.bg)
+        .border(0.5, k.c.success.border)
+        .child(el().size(5.0, 5.0).radius(2.5).fill(k.c.success.fg))
+        .child(
+            text(label.to_string())
+                .font(k.ty.small_medium)
+                .color(k.c.success.fg),
+        )
+}
+
+fn device_head(s: &Ui, k: &Kit) -> El {
+    let connected = has_device(s);
     let running = s.running.get(&s.config.device).copied().unwrap_or(false);
-    let label = if running {
+    let avatar = el()
+        .size(36.0, 36.0)
+        .radius(8.0)
+        .fill(k.c.layer_02)
+        .center()
+        .child(rune::icon(&icons::PHONE, 18.0).color(k.c.icon_base));
+    let row = if !connected {
+        row()
+            .w_full()
+            .h(36.0)
+            .gap(12.0)
+            .center_y()
+            .child(avatar)
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(
+                        text(tr(s, "device.emptyTitle"))
+                            .font(k.ty.body_medium)
+                            .color(k.c.text_base),
+                    )
+                    .child(
+                        text(tr(s, "device.emptyBody"))
+                            .font(k.ty.small)
+                            .color(k.c.text_muted)
+                            .truncate(),
+                    ),
+            )
+            .child(
+                Button::new(tr(s, "sidebar.connect"))
+                    .variant(ButtonVariant::Submit)
+                    .control_size(ControlSize::Regular)
+                    .on_press(|s: &mut Ui| s.connect_open = true)
+                    .build(k)
+                    .key("device-connect"),
+            )
+    } else {
+        let name = s
+            .devices
+            .iter()
+            .find(|d| d.serial == s.config.device)
+            .map(|d| d.label().to_string())
+            .unwrap_or_else(|| s.config.device.clone());
+        let transport = if s.config.device.contains(':') {
+            tr(s, "sidebar.wifi")
+        } else {
+            tr(s, "sidebar.usb")
+        };
+        row()
+            .w_full()
+            .h(36.0)
+            .gap(12.0)
+            .center_y()
+            .child(avatar)
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .child(text(name).font(k.ty.body_medium).color(k.c.text_base))
+                    .child(
+                        text(format!("{} · {transport}", s.config.device))
+                            .font(k.ty.small)
+                            .color(k.c.text_faint)
+                            .truncate(),
+                    ),
+            )
+            .child(
+                row()
+                    .gap(8.0)
+                    .center_y()
+                    .child(device_badge(
+                        k,
+                        if running {
+                            tr(s, "device.live")
+                        } else {
+                            tr(s, "sidebar.ready")
+                        },
+                    ))
+                    .child(
+                        Button::new(tr(s, "device.disconnect"))
+                            .variant(ButtonVariant::GhostMuted)
+                            .control_size(ControlSize::Regular)
+                            .on_press(|s: &mut Ui| s.disconnect_device())
+                            .build(k)
+                            .key("device-disconnect"),
+                    ),
+            )
+    };
+    col()
+        .key("device-head")
+        .w_full()
+        .gap(14.0)
+        .child(row)
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
+}
+
+fn action_summary(s: &Ui, k: &Kit) -> El {
+    let empty = !has_device(s);
+    let running = s.running.get(&s.config.device).copied().unwrap_or(false);
+    let name = if empty {
+        tr(s, "ui.noDevice").to_string()
+    } else {
+        s.devices
+            .iter()
+            .find(|d| d.serial == s.config.device)
+            .map(|d| d.label().to_string())
+            .unwrap_or_else(|| s.config.device.clone())
+    };
+    let mut summary = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(6.0)
+        .center_y()
+        .child(rune::icon(&icons::PHONE, 12.0).color(k.c.icon_muted))
+        .child(
+            text(name)
+                .font(k.ty.ui_medium)
+                .color(k.c.text_base)
+                .truncate(),
+        );
+    if !empty {
+        let transport = if s.config.device.contains(':') {
+            tr(s, "sidebar.wifi")
+        } else {
+            tr(s, "sidebar.usb")
+        };
+        summary = summary.child(text(transport).font(k.ty.small).color(k.c.text_faint));
+        let chips: Vec<String> = match s.tab {
+            SessionKind::Mirror => vec![
+                display_option(&s.locale, "res", s.config.res.as_deref().unwrap_or("0")),
+                display_option(
+                    &s.locale,
+                    "fps",
+                    &s.config
+                        .fps
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "Auto".into()),
+                ),
+                s.config.codec.clone().unwrap_or_else(|| "h264".into()),
+            ],
+            SessionKind::Camera => vec![
+                display_option(
+                    &s.locale,
+                    "lens",
+                    s.config.camera_id.as_deref().unwrap_or("Auto Select"),
+                ),
+                display_option(
+                    &s.locale,
+                    "aspect",
+                    s.config.camera_ar.as_deref().unwrap_or("0"),
+                ),
+                s.config.codec.clone().unwrap_or_else(|| "h264".into()),
+            ],
+            SessionKind::Desktop => vec![
+                format!(
+                    "{}×{}",
+                    s.config.vd_width.unwrap_or(1920),
+                    s.config.vd_height.unwrap_or(1080)
+                ),
+                format!("{} DPI", s.config.vd_dpi.unwrap_or(420)),
+                s.config.codec.clone().unwrap_or_else(|| "h264".into()),
+            ],
+        };
+        for chip in chips {
+            summary = summary
+                .child(text("·").font(k.ty.small).color(k.c.text_faint))
+                .child(text(chip).font(k.ty.small).color(k.c.text_muted));
+        }
+    }
+    if running {
+        summary = summary.child(
+            row()
+                .gap(5.0)
+                .center_y()
+                .child(el().size(5.0, 5.0).radius(2.5).fill(k.c.success.fg))
+                .child(
+                    text(tr(s, "device.live"))
+                        .font(k.ty.small_medium)
+                        .color(k.c.success.fg),
+                ),
+        );
+    }
+    summary
+}
+
+fn actionbar(s: &Ui, k: &Kit) -> El {
+    let connected = has_device(s);
+    let running = s.running.get(&s.config.device).copied().unwrap_or(false);
+    let empty = !connected;
+    let label = if empty {
+        tr(s, "device.select")
+    } else if running {
         tr(s, "controlPanel.stopSession")
     } else {
         match s.tab {
@@ -744,342 +1032,284 @@ fn main_view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
             SessionKind::Desktop => tr(s, "controlPanel.ejectToDesktop"),
         }
     };
-    let start = Button::new(label)
+    let device = s.config.device.clone();
+    let button = Button::new(label)
         .variant(if running {
             ButtonVariant::Danger
         } else {
             ButtonVariant::Submit
         })
         .control_size(ControlSize::ExtraLarge)
-        .disabled(s.config.device.is_empty())
+        .disabled(empty)
         .on_press(move |s: &mut Ui| {
             if running {
-                let device = s.config.device.clone();
                 s.stop_session(&device);
             } else {
                 s.start_session();
             }
         })
         .build(k)
+        .min_w(148.0)
         .key("start-stop");
-    let target = if s.config.device.is_empty() {
-        tr(s, "ui.noDevice").to_string()
-    } else {
-        let transport = if s.config.device.contains(':') {
-            tr(s, "sidebar.wifi")
-        } else {
-            tr(s, "sidebar.usb")
-        };
-        format!("{} · {}", s.config.device, transport)
-    };
-    let config = match s.tab {
-        SessionKind::Mirror => mirror_config(s, k, layer),
-        SessionKind::Camera => camera_config(s, k, layer),
-        SessionKind::Desktop => desktop_config(s, k, layer),
-    };
     col()
-        .key("main-content")
+        .key("actionbar")
         .w_full()
-        .gap(16.0)
-        .padding(16.0)
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
+        .child(
+            row()
+                .w_full()
+                .h(60.0)
+                .px(32.0)
+                .justify_center()
+                .center_y()
+                .child(
+                    row()
+                        .w(720.0)
+                        .gap(12.0)
+                        .center_y()
+                        .child(action_summary(s, k))
+                        .child(button),
+                ),
+        )
+}
+
+fn console_strip(s: &Ui, k: &Kit) -> El {
+    let preview = s
+        .logs
+        .last()
+        .map(|(_, line)| line.clone())
+        .unwrap_or_default();
+    let mut header = row()
+        .key("console-toggle")
+        .w_full()
+        .h(44.0)
+        .px(32.0)
+        .center_y()
+        .focusable(true)
+        .role("button")
+        .on_press(|s: &mut Ui| s.console_open = !s.console_open);
+    header = k.interactive(header);
+    let header = header
+        .child(row().grow(1.0))
+        .child(
+            row()
+                .w(720.0)
+                .gap(8.0)
+                .center_y()
+                .child(rune::icon(&glyphs::FILE_CODE, 14.0).color(k.c.icon_muted))
+                .child(
+                    text(tr(s, "logPanel.systemConsole"))
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_muted),
+                )
+                .child(
+                    text(preview)
+                        .font(k.ty.mono)
+                        .color(k.c.text_faint)
+                        .truncate()
+                        .grow(1.0),
+                )
+                .child(
+                    rune::icon(
+                        if s.console_open {
+                            k.glyph.chevron_up
+                        } else {
+                            k.glyph.chevron_down
+                        },
+                        16.0,
+                    )
+                    .color(k.c.icon_muted),
+                ),
+        )
+        .child(row().grow(1.0));
+    let mut strip = col()
+        .key("console")
+        .w_full()
+        .fill(k.c.bg_deep)
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
+        .child(header);
+    if s.console_open {
+        let mut logs = col().key("console-lines").w_full().gap(2.0);
+        for (i, (time, line)) in s.logs.iter().enumerate() {
+            let mut entry = row().key(format!("log-{i}")).gap(12.0);
+            if i + 1 == s.logs.len() {
+                entry = entry.live_region(LiveRegion::Polite);
+            }
+            entry = entry
+                .child(text(time.clone()).font(k.ty.mono).color(k.c.text_faint))
+                .child(
+                    text(line.clone())
+                        .font(k.ty.mono)
+                        .color(k.c.text_muted)
+                        .truncate(),
+                );
+            logs = logs.child(entry);
+        }
+        let logs = logs
+            .scroll(ScrollSpec { stick_bottom: true })
+            .h(120.0)
+            .min_h(0.0);
+        let body = col()
+            .w(720.0)
+            .self_center()
+            .gap(4.0)
+            .child(
+                row()
+                    .w_full()
+                    .child(row().grow(1.0))
+                    .child(
+                        Button::new(tr(s, "logPanel.report"))
+                            .variant(ButtonVariant::GhostMuted)
+                            .control_size(ControlSize::Small)
+                            .on_press(|s: &mut Ui| s.export_report())
+                            .build(k)
+                            .key("console-export"),
+                    )
+                    .child(
+                        Button::new(tr(s, "logPanel.clear"))
+                            .variant(ButtonVariant::GhostMuted)
+                            .control_size(ControlSize::Small)
+                            .on_press(|s: &mut Ui| s.logs.clear())
+                            .build(k)
+                            .key("console-clear"),
+                    ),
+            )
+            .child(logs)
+            .child(
+                TextInput::new(&s.command)
+                    .label(tr(s, "logPanel.terminalPlaceholder"))
+                    .placeholder(tr(s, "logPanel.terminalPlaceholder"))
+                    .width(None)
+                    .on_edit(|s: &mut Ui| &mut s.command)
+                    .on_submit(|s: &mut Ui, _| {
+                        let cmd = s.command.text.clone();
+                        s.run_command(cmd);
+                        s.command.replace_text("");
+                    })
+                    .build(k)
+                    .key("console-input"),
+            );
+        strip = strip.child(col().w_full().px(32.0).pb(10.0).child(body));
+    }
+    strip
+}
+
+fn main_view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let scroll = col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        .px(32.0)
+        .pt(24.0)
+        .pb(16.0)
         .child(
-            SegmentedControl::new(
-                &[
-                    tr(s, "controlPanel.screen"),
-                    tr(s, "controlPanel.camera"),
-                    tr(s, "controlPanel.desktop"),
-                ],
-                Some(s.tab as usize),
-            )
-            .label(tr(s, "controlPanel.captureSource"))
-            .width(None)
-            .on_pick(|s: &mut Ui, i, _| {
-                s.tab = match i {
-                    0 => SessionKind::Mirror,
-                    1 => SessionKind::Camera,
-                    _ => SessionKind::Desktop,
-                };
-            })
-            .build(k),
-        )
-        .child(section_card(
-            k,
-            "engine",
-            tr(s, "controlPanel.engineConfiguration"),
-            Some(&icons::GEAR),
-            vec![text(target).font(k.ty.small).color(k.c.text_muted), config],
-        ))
-        .child(start)
-        .child(console(s, k))
+            col()
+                .w_full()
+                .max_w(720.0)
+                .self_center()
+                .child(mode_row(s, k))
+                .child(device_head(s, k))
+                .child(settings_card(s, k, layer)),
+        );
+    col()
+        .key("main")
+        .grow(1.0)
+        .h_full()
+        .min_w(0.0)
+        .fill(k.c.bg_base)
+        .child(scroll)
+        .child(actionbar(s, k))
+        .child(console_strip(s, k))
 }
 
-fn appearance_card(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> El {
-    let selected = match s.color_mode.as_str() {
-        "light" => 0,
-        "dark" => 1,
-        _ => 2,
+fn topbar(s: &Ui, k: &Kit, insets: rune::ChromeInsets) -> El {
+    let dot = match s.scrcpy_ok {
+        Some(true) => k.c.success.fg,
+        Some(false) => k.c.danger.fg,
+        None => k.c.warning.fg,
     };
-    let language_labels: Vec<String> = LOCALES
-        .iter()
-        .map(|code| language_name(&s.locale, code).to_string())
-        .collect();
-    let language = Select::new("locale", &language_labels)
-        .width(180.0)
-        .current(Some(language_name(&s.locale, &s.locale)))
-        .label(tr(s, "header.languageLabel"))
-        .open(s.open_select.as_deref() == Some("locale"))
-        .on_toggle(|s: &mut Ui| {
-            s.open_select = if s.open_select.as_deref() == Some("locale") {
-                None
-            } else {
-                Some("locale".into())
-            }
-        })
-        .on_close(|s: &mut Ui| s.open_select = None)
-        .on_choose(|s: &mut Ui, label: &str, _| {
-            if let Some(i) = LOCALES
-                .iter()
-                .position(|code| language_name(&s.locale, code) == label)
-            {
-                s.set_locale(LOCALES[i]);
-            }
-        })
-        .build(k, layer);
-    section_card(
-        k,
-        "appearance",
-        tr(s, "header.themeLabel"),
-        None,
-        vec![
-            SegmentedControl::new(
-                &[
-                    tr(s, "header.colorModes.light"),
-                    tr(s, "header.colorModes.dark"),
-                    tr(s, "header.colorModes.system"),
-                ],
-                Some(selected),
-            )
-            .label(tr(s, "header.colorModes.light"))
-            .width(None)
-            .on_pick(move |s: &mut Ui, i, _| {
-                s.set_color_mode(
-                    match i {
-                        0 => "light",
-                        1 => "dark",
-                        _ => "system",
-                    },
-                    system_dark,
-                );
-            })
-            .build(k),
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(tr(s, "header.languageLabel"))
-                        .font(k.ty.small)
-                        .color(k.c.text_muted),
-                )
-                .child(language),
-            switch_row(s, k, tr(s, "header.panelOnTop"), s.panel_on_top, |s| {
-                s.toggle_panel_on_top()
-            }),
-        ],
-    )
-}
-
-fn behavior_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
-    let mut rows = col().w_full().gap(4.0);
-    for (label, value, key, fallback) in [
-        (
-            "sessionBehavior.stayAwake",
-            s.config.stay_awake,
-            "stay_awake",
-            false,
-        ),
-        (
-            "sessionBehavior.keepActive",
-            s.config.keep_active,
-            "keep_active",
-            false,
-        ),
-        (
-            "sessionBehavior.screenOff",
-            s.config.turn_off,
-            "turn_off",
-            false,
-        ),
-        (
-            "sessionBehavior.forwardAudio",
-            s.config.audio_enabled,
-            "audio_enabled",
-            true,
-        ),
-        (
-            "sessionBehavior.alwaysOnTop",
-            s.config.always_on_top,
-            "always_on_top",
-            false,
-        ),
-        (
-            "sessionBehavior.fullScreen",
-            s.config.fullscreen,
-            "fullscreen",
-            false,
-        ),
-        (
-            "sessionBehavior.borderless",
-            s.config.borderless,
-            "borderless",
-            false,
-        ),
-    ] {
-        rows = rows.child(switch_row(
-            s,
-            k,
-            tr(s, label),
-            value.unwrap_or(fallback),
-            move |s: &mut Ui| {
-                match key {
-                    "stay_awake" => flip(&mut s.config.stay_awake, false),
-                    "keep_active" => flip(&mut s.config.keep_active, false),
-                    "turn_off" => flip(&mut s.config.turn_off, false),
-                    "audio_enabled" => flip(&mut s.config.audio_enabled, true),
-                    "always_on_top" => flip(&mut s.config.always_on_top, false),
-                    "fullscreen" => flip(&mut s.config.fullscreen, false),
-                    "borderless" => flip(&mut s.config.borderless, false),
-                    _ => {}
-                }
-                s.save_config();
-            },
-        ));
-    }
-    rows = rows.child(switch_row(
-        s,
-        k,
-        tr(s, "sessionBehavior.rememberWindowPosition"),
-        s.remember_position,
-        |s| s.toggle_remember_position(),
-    ));
-    rows = rows.child(switch_row(
-        s,
-        k,
-        tr(s, "sessionBehavior.recordFeed"),
-        s.config.record.unwrap_or(false),
-        |s| {
-            flip(&mut s.config.record, false);
-            s.save_config();
-        },
-    ));
-    if s.config.record.unwrap_or(false) {
-        rows = rows.child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(
-                        s.config
-                            .record_path
-                            .as_deref()
-                            .unwrap_or_else(|| tr(s, "sessionBehavior.defaultVideosFolder")),
-                    )
-                    .font(k.ty.small)
-                    .color(k.c.text_faint)
-                    .truncate()
-                    .grow(1.0),
-                )
-                .child(folder_button(
-                    s,
-                    k,
-                    tr(s, "sessionBehavior.change"),
-                    |s, path| {
-                        s.set_record_path(path.to_string_lossy().to_string());
-                    },
-                )),
+    let status = if s.download.active {
+        tv(
+            &s.locale,
+            "header.syncingComponents",
+            &[("progress", &s.download.percent.to_string())],
+        )
+    } else if s.scrcpy_ok == Some(true) {
+        tr(s, "header.scrcpyReady").to_string()
+    } else {
+        s.scrcpy_message.clone()
+    };
+    let mut status_row = row()
+        .max_w(320.0)
+        .gap(6.0)
+        .center_y()
+        .child(el().size(6.0, 6.0).radius(3.0).fill(dot));
+    if s.download.active {
+        status_row = status_row.child(
+            el().key("sync-spinner")
+                .size(12.0, 12.0)
+                .center()
+                .child(Spinner::new().size(12.0).color(k.c.success.fg).build(k)),
         );
     }
-    rows = rows.child(
-        row()
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .child(
-                text(tr(s, "sessionBehavior.audioCodec"))
-                    .font(k.ty.small)
-                    .color(k.c.text_muted),
-            )
-            .child(select_control(
-                s,
-                k,
-                layer,
-                "audio",
-                AUDIO_CODEC,
-                s.config.audio_codec.as_deref().unwrap_or("auto"),
-                tr(s, "sessionBehavior.audioCodec"),
-                140.0,
-            )),
+    status_row = status_row.child(
+        text(status.clone())
+            .font(k.ty.small)
+            .color(k.c.text_muted)
+            .truncate()
+            .help(status),
     );
-    section_card(
-        k,
-        "behavior",
-        tr(s, "sessionBehavior.title"),
-        Some(&icons::GEAR),
-        vec![rows],
-    )
-}
-
-fn shortcuts_card(s: &Ui, k: &Kit) -> El {
-    let keys: [(&str, &str); 8] = [
-        ("F", "shortcuts.full"),
-        ("H", "shortcuts.home"),
-        ("B", "shortcuts.back"),
-        ("S", "shortcuts.recents"),
-        ("P", "shortcuts.power"),
-        ("R", "shortcuts.rotate"),
-        ("V", "shortcuts.paste"),
-        ("O", "shortcuts.off"),
-    ];
-    let mut rows = col().w_full().gap(4.0);
-    for (key, label) in keys {
-        rows = rows.child(
+    let brand = row()
+        .gap(8.0)
+        .center_y()
+        .child(
+            el().size(22.0, 22.0)
+                .radius(6.0)
+                .fill(k.c.layer_02)
+                .center()
+                .child(rune::icon(&icons::PHONE, 13.0).color(k.c.icon_base)),
+        )
+        .child(text("ScrcpyGUI").font(k.ty.ui_medium).color(k.c.text_base));
+    let settings = IconButton::new(&icons::GEAR)
+        .variant(IconButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .label(tr(s, "settings.title"))
+        .on_press(|s: &mut Ui| s.settings_open = !s.settings_open)
+        .build(k)
+        .key("open-settings");
+    col()
+        .key("topbar")
+        .w_full()
+        .child(
             row()
                 .w_full()
+                .h(47.0)
+                .pl(16.0 + insets.leading)
+                .pr(insets.trailing + 8.0)
                 .gap(8.0)
                 .center_y()
-                .child(
-                    text(tr(s, label))
-                        .font(k.ty.small)
-                        .color(k.c.text_muted)
-                        .grow(1.0),
-                )
-                .child(rune_kit::Keybind::new(&["Alt", key]).build(k)),
-        );
-    }
-    section_card(
-        k,
-        "shortcuts",
-        tr(s, "shortcuts.title"),
-        Some(&glyphs::KEYBOARD),
-        vec![rows],
-    )
+                .window_drag()
+                .child(brand)
+                .child(row().grow(1.0))
+                .child(status_row)
+                .child(settings),
+        )
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
 }
 
-fn sidebar(s: &Ui, k: &Kit) -> El {
+fn rail(s: &Ui, k: &Kit) -> El {
+    let refresh = Button::new(tr(s, "sidebar.refresh"))
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .disabled(s.is_refreshing)
+        .on_press(|s: &mut Ui| s.refresh_devices())
+        .build(k);
     let mut sidebar = Sidebar::new().header(
         SidebarHeader::new(tr(s, "sidebar.deviceHub"))
-            .action(
-                Button::new(tr(s, "sidebar.refresh"))
-                    .variant(ButtonVariant::GhostMuted)
-                    .control_size(ControlSize::Small)
-                    .disabled(s.is_refreshing)
-                    .on_press(|s: &mut Ui| s.refresh_devices())
-                    .build(k),
-            )
+            .action(refresh)
             .build(k),
     );
     let mut devices = Vec::new();
@@ -1099,37 +1329,34 @@ fn sidebar(s: &Ui, k: &Kit) -> El {
         } else {
             tr(s, "sidebar.usb")
         };
-        let detail = format!("{} · {}", serial, transport);
-        devices.push(
-            SidebarRow::new(device.label())
-                .subtitle(detail)
-                .icon(&icons::PHONE)
-                .selected(s.config.device == serial)
-                .on_select(move |s: &mut Ui, _| s.select_device(serial.clone()))
-                .build(k)
-                .key(format!("device-{}", device.serial)),
-        );
+        let selected = s.config.device == serial;
+        let row = SidebarRow::new(device.label())
+            .subtitle(format!("{} · {}", serial, transport))
+            .icon(&icons::PHONE)
+            .selected(selected)
+            .on_select(move |s: &mut Ui, _| s.select_device(serial.clone()));
+        devices.push(row.build(k).key(format!("device-{}", device.serial)));
     }
     sidebar = sidebar.section(
         SidebarSection::new(tr(s, "sidebar.devices"))
             .count(s.devices.len())
             .rows(devices),
     );
-    let mut recent = Vec::new();
-    for ip in &s.history {
-        let target = ip.clone();
-        recent.push(
-            SidebarRow::new(ip)
-                .detail(tr(s, "sidebar.connect"))
-                .on_select(move |s: &mut Ui, _| {
-                    s.ip.replace_text(target.clone());
-                    s.connect(target.clone());
-                })
-                .build(k)
-                .key(format!("recent-{ip}")),
-        );
-    }
-    if !recent.is_empty() {
+    if !s.history.is_empty() {
+        let mut recent = Vec::new();
+        for ip in &s.history {
+            let target = ip.clone();
+            recent.push(
+                SidebarRow::new(ip)
+                    .detail(tr(s, "sidebar.connect"))
+                    .on_select(move |s: &mut Ui, _| {
+                        s.ip.replace_text(target.clone());
+                        s.connect(target.clone());
+                    })
+                    .build(k)
+                    .key(format!("recent-{ip}")),
+            );
+        }
         sidebar = sidebar.section(
             SidebarSection::new(tr(s, "sidebar.recentDevices"))
                 .count(s.history.len())
@@ -1172,94 +1399,387 @@ fn sidebar(s: &Ui, k: &Kit) -> El {
                     .key("about"),
             ),
     );
-    sidebar.build(k)
+    col()
+        .key("rail")
+        .w(264.0)
+        .h_full()
+        .fill(k.c.bg_deep)
+        .child(sidebar.build(k))
 }
 
-fn toolbar(s: &Ui, k: &Kit, insets: rune::ChromeInsets, trigger: El) -> Toolbar {
-    let dot = match s.scrcpy_ok {
-        Some(true) => k.c.success.fg,
-        Some(false) => k.c.danger.fg,
-        None => k.c.warning.fg,
+fn pair_rows(items: Vec<El>) -> El {
+    let mut rows = col().w_full().gap(0.0);
+    let mut iter = items.into_iter();
+    while let Some(first) = iter.next() {
+        let second = iter.next();
+        let mut row = row()
+            .w_full()
+            .gap(16.0)
+            .child(col().grow(1.0).min_w(0.0).child(first));
+        row = match second {
+            Some(second) => row.child(col().grow(1.0).min_w(0.0).child(second)),
+            None => row.child(col().grow(1.0).min_w(0.0)),
+        };
+        rows = rows.child(row);
+    }
+    rows
+}
+
+fn drawer_section(k: &Kit, title: &str, content: El) -> El {
+    col()
+        .w_full()
+        .gap(8.0)
+        .child(section_heading(k, title))
+        .child(content)
+}
+
+fn drawer_appearance(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> El {
+    let selected = match s.color_mode.as_str() {
+        "light" => 0,
+        "dark" => 1,
+        _ => 2,
     };
-    let status = if s.download.active {
-        tv(
-            &s.locale,
-            "header.syncingComponents",
-            &[("progress", &s.download.percent.to_string())],
+    let language_labels: Vec<String> = LOCALES
+        .iter()
+        .map(|code| language_name(&s.locale, code).to_string())
+        .collect();
+    let language = Select::new("locale", &language_labels)
+        .width(180.0)
+        .current(Some(language_name(&s.locale, &s.locale)))
+        .label(tr(s, "header.languageLabel"))
+        .open(s.open_select.as_deref() == Some("locale"))
+        .on_toggle(|s: &mut Ui| {
+            s.open_select = if s.open_select.as_deref() == Some("locale") {
+                None
+            } else {
+                Some("locale".into())
+            }
+        })
+        .on_close(|s: &mut Ui| s.open_select = None)
+        .on_choose(|s: &mut Ui, label: &str, _| {
+            if let Some(i) = LOCALES
+                .iter()
+                .position(|code| language_name(&s.locale, code) == label)
+            {
+                s.set_locale(LOCALES[i]);
+            }
+        })
+        .build(k, layer);
+    let themes = SegmentedControl::new(
+        &[
+            tr(s, "header.colorModes.light"),
+            tr(s, "header.colorModes.dark"),
+            tr(s, "header.colorModes.system"),
+        ],
+        Some(selected),
+    )
+    .label(tr(s, "settings.appearance"))
+    .width(None)
+    .on_pick(move |s: &mut Ui, i, _| {
+        s.set_color_mode(
+            match i {
+                0 => "light",
+                1 => "dark",
+                _ => "system",
+            },
+            system_dark,
+        );
+    })
+    .build(k);
+    let content = col()
+        .w_full()
+        .gap(8.0)
+        .child(themes)
+        .child(
+            row()
+                .w_full()
+                .h(28.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(tr(s, "header.languageLabel"))
+                        .font(k.ty.ui)
+                        .color(k.c.text_base)
+                        .grow(1.0),
+                )
+                .child(language),
         )
-    } else if s.scrcpy_ok == Some(true) {
-        tr(s, "header.scrcpyReady").to_string()
-    } else {
-        s.scrcpy_message.clone()
-    };
-    let mut trailing = row().gap(8.0).center_y();
-    trailing = trailing.child(
-        Button::new(tr(s, "sidebar.connect"))
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Small)
-            .on_press(|s: &mut Ui| s.connect_open = true)
-            .build(k),
+        .child(switch_row(
+            k,
+            tr(s, "header.panelOnTop"),
+            s.panel_on_top,
+            |s| s.toggle_panel_on_top(),
+        ));
+    drawer_section(k, tr(s, "settings.appearance"), content)
+}
+
+fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let switches = vec![
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.stayAwake"),
+            s.config.stay_awake.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.stay_awake, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.keepActive"),
+            s.config.keep_active.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.keep_active, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.screenOff"),
+            s.config.turn_off.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.turn_off, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.alwaysOnTop"),
+            s.config.always_on_top.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.always_on_top, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.fullScreen"),
+            s.config.fullscreen.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.fullscreen, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.borderless"),
+            s.config.borderless.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.borderless, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.rememberWindowPosition"),
+            s.remember_position,
+            |s| s.toggle_remember_position(),
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.recordFeed"),
+            s.config.record.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.record, false);
+                s.save_config();
+            },
+        ),
+    ];
+    let mut content = col().w_full().gap(8.0).child(pair_rows(switches)).child(
+        row()
+            .w_full()
+            .h(28.0)
+            .gap(8.0)
+            .center_y()
+            .child(
+                text(tr(s, "sessionBehavior.audioCodec"))
+                    .font(k.ty.ui)
+                    .color(k.c.text_base)
+                    .grow(1.0),
+            )
+            .child(select_control(
+                s,
+                k,
+                layer,
+                "audio",
+                AUDIO_CODEC,
+                s.config.audio_codec.as_deref().unwrap_or("auto"),
+                tr(s, "sessionBehavior.audioCodec"),
+                170.0,
+            )),
     );
+    if s.config.record.unwrap_or(false) {
+        content = content.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(
+                        s.config
+                            .record_path
+                            .as_deref()
+                            .unwrap_or_else(|| tr(s, "sessionBehavior.defaultVideosFolder")),
+                    )
+                    .font(k.ty.small)
+                    .color(k.c.text_faint)
+                    .truncate()
+                    .grow(1.0),
+                )
+                .child(folder_button(
+                    s,
+                    k,
+                    tr(s, "sessionBehavior.change"),
+                    |s, path| {
+                        s.set_record_path(path.to_string_lossy().to_string());
+                    },
+                )),
+        );
+    }
+    drawer_section(k, tr(s, "sessionBehavior.title"), content)
+}
+
+fn drawer_shortcuts(s: &Ui, k: &Kit) -> El {
+    let keys: [(&str, &str); 8] = [
+        ("F", "shortcuts.full"),
+        ("H", "shortcuts.home"),
+        ("B", "shortcuts.back"),
+        ("S", "shortcuts.recents"),
+        ("P", "shortcuts.power"),
+        ("R", "shortcuts.rotate"),
+        ("V", "shortcuts.paste"),
+        ("O", "shortcuts.off"),
+    ];
+    let mut rows = Vec::new();
+    for (key, label) in keys {
+        rows.push(
+            row()
+                .w_full()
+                .h(28.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(tr(s, label))
+                        .font(k.ty.ui)
+                        .color(k.c.text_muted)
+                        .grow(1.0),
+                )
+                .child(Keybind::new(&["Alt", key]).build(k)),
+        );
+    }
+    drawer_section(k, tr(s, "shortcuts.title"), pair_rows(rows))
+}
+
+fn drawer_core(s: &Ui, k: &Kit) -> El {
+    let path = s
+        .config
+        .scrcpy_path
+        .clone()
+        .unwrap_or_else(|| "scrcpy · Rust".into());
+    let mut buttons = row().w_full().gap(8.0).child(folder_button(
+        s,
+        k,
+        tr(s, "header.selectFolder"),
+        |s, path| {
+            s.set_scrcpy_path(Some(path.to_string_lossy().to_string()));
+        },
+    ));
     if s.scrcpy_ok == Some(false) {
-        trailing = trailing.child(
+        buttons = buttons.child(
             Button::new(tr(s, "header.installCore"))
                 .variant(ButtonVariant::Contrast)
                 .control_size(ControlSize::Small)
                 .on_press(|s: &mut Ui| s.download_scrcpy())
                 .build(k),
         );
-    } else {
-        trailing = trailing.child(
-            Button::new(tr(s, "header.selectFolder"))
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Small)
-                .on_press_tx(move |s: &mut Ui, tx: &mut rune::Tx| {
-                    let opts = rune::FileDialogOptions {
-                        title: tr(s, "header.selectFolder").into(),
-                        ..Default::default()
-                    };
-                    tx.open_folder(opts, |s: &mut Ui, result, _| {
-                        if let Ok(Some(path)) = result {
-                            s.set_scrcpy_path(Some(path.to_string_lossy().to_string()));
-                        }
-                    });
-                })
-                .build(k),
-        );
     }
-    let trigger = row()
-        .mr(insets.trailing)
-        .gap(8.0)
+    buttons = buttons.child(
+        Button::new(tr(s, "ui.endAdb"))
+            .variant(ButtonVariant::Danger)
+            .control_size(ControlSize::Small)
+            .on_press(|s: &mut Ui| {
+                s.settings_open = false;
+                s.confirm_kill_adb = true;
+            })
+            .build(k),
+    );
+    drawer_section(
+        k,
+        tr(s, "footer.core"),
+        col()
+            .w_full()
+            .gap(8.0)
+            .child(
+                col()
+                    .w_full()
+                    .gap(1.0)
+                    .child(text("scrcpy").font(k.ty.ui_medium).color(k.c.text_base))
+                    .child(text(path).font(k.ty.small).color(k.c.text_faint).truncate()),
+            )
+            .child(buttons),
+    )
+}
+
+fn settings_drawer(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) {
+    if !s.settings_open {
+        return;
+    }
+    let mut popups = Vec::new();
+    let body = col()
+        .w_full()
+        .gap(20.0)
+        .child(drawer_appearance(s, k, &mut popups, system_dark))
+        .child(drawer_behavior(s, k, &mut popups))
+        .child(drawer_shortcuts(s, k))
+        .child(drawer_core(s, k));
+    let header = row()
+        .w_full()
+        .h(50.0)
+        .px(16.0)
         .center_y()
         .child(
-            row()
-                .gap(6.0)
-                .center_y()
-                .child(el().size(7.0, 7.0).radius(3.5).fill(dot))
-                .child({
-                    let mut line = row().gap(6.0).center_y();
-                    if s.download.active {
-                        line = line.child(
-                            el().key("sync-spinner")
-                                .size(12.0, 12.0)
-                                .center()
-                                .child(Spinner::new().size(12.0).color(k.c.success.fg).build(k)),
-                        );
-                    }
-                    line.child(
-                        text(status.clone())
-                            .font(k.ty.small)
-                            .color(k.c.text_muted)
-                            .truncate()
-                            .help(status),
-                    )
-                }),
+            text(tr(s, "settings.title"))
+                .font(k.ty.body_medium)
+                .color(k.c.text_base)
+                .grow(1.0),
         )
-        .child(trailing)
-        .child(trigger);
-    Toolbar::new()
-        .leading(text("ScrcpyGUI").font(k.ty.ui_medium).color(k.c.text_base))
-        .trailing(trigger)
+        .child(
+            IconButton::new(k.glyph.close)
+                .variant(IconButtonVariant::GhostMuted)
+                .control_size(ControlSize::Regular)
+                .label(tr(s, "common.close"))
+                .on_press(|s: &mut Ui| s.settings_open = false)
+                .build(k)
+                .key("close-settings"),
+        );
+    let panel = col()
+        .key("settings-drawer")
+        .pin(None, Some(48.0), Some(0.0), Some(0.0))
+        .w(380.0)
+        .fill(k.c.layer_01)
+        .child(header)
+        .child(el().h(1.0).w_full().fill(k.c.border_muted))
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(col().w_full().padding(16.0).gap(20.0).child(body)),
+        );
+    let panel = k
+        .elevate(panel, &k.elevation.overlay)
+        .modal(true, |s: &mut Ui| s.settings_open = false);
+    layer.push(
+        el().key("settings-scrim")
+            .pin(Some(0.0), Some(48.0), Some(0.0), Some(0.0))
+            .fill(k.c.scrim)
+            .on_press(|s: &mut Ui| s.settings_open = false),
+    );
+    layer.push(panel);
+    layer.extend(popups);
 }
 
 fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
@@ -1284,7 +1804,7 @@ fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     });
     for service in &s.mdns {
         let address = service.address.clone();
-        let label = format!("{}  ·  {}", service.name, address);
+        let label = format!("{} · {}", service.name, address);
         mdns = mdns.child(
             Button::new(label)
                 .variant(ButtonVariant::Ghost)
@@ -1557,88 +2077,30 @@ fn alert_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
 pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     let system_dark = cx.system_dark();
     let dark = s.resolved_dark(system_dark);
-    let mut kit = theme::kit(dark).clone();
-    // Dialogs, menus and select popups use `layer_01`; keep it opaque so the
-    // page behind doesn't read through the panel.
-    kit.c.layer_01 = Color {
-        a: 1.0,
-        ..kit.c.layer_01
-    };
-    let k: &Kit = &kit;
+    let k = theme::kit(dark);
+    // The system's caption symbols follow the OS appearance; keep them readable on
+    // the app's own light or dark titlebar instead.
+    cx.caption_color(k.c.icon_muted);
     let insets = cx.chrome_insets();
-    let mut layer: Vec<El> = Vec::new();
+    let mut layer = Vec::new();
 
-    let menu_trigger = Button::new("⋯")
-        .variant(ButtonVariant::GhostMuted)
-        .control_size(ControlSize::Small)
-        .on_press(|s: &mut Ui| s.app_menu = true)
-        .build(k)
-        .key("app-menu-trigger");
-    let app_menu = Menu::new("app")
-        .trigger(menu_trigger)
-        .open(s.app_menu)
-        .min_width(200.0)
-        .item(
-            MenuItem::new(tr(s, "sidebar.refresh")).on_select(|s: &mut Ui| {
-                s.app_menu = false;
-                s.refresh_devices();
-            }),
-        )
-        .item(
-            MenuItem::new(tr(s, "sidebar.connect")).on_select(|s: &mut Ui| {
-                s.app_menu = false;
-                s.connect_open = true;
-            }),
-        )
-        .item(
-            MenuItem::new(tr(s, "ui.endAdb"))
-                .danger(true)
-                .on_select(|s: &mut Ui| {
-                    s.app_menu = false;
-                    s.confirm_kill_adb = true;
-                }),
-        )
-        .separator()
-        .item(
-            MenuItem::new(tr(s, "footer.aboutScrcpyGui")).on_select(|s: &mut Ui| {
-                s.app_menu = false;
-                s.about_open = true;
-            }),
-        )
-        .on_close(|s: &mut Ui| s.app_menu = false)
-        .build(k, &mut layer);
-
-    let sidebar = sidebar(s, k);
     let main = main_view(s, k, &mut layer);
-    let inspector = col()
-        .key("inspector")
+    let shell = col()
         .w_full()
-        .gap(16.0)
-        .padding(16.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .child(appearance_card(s, k, &mut layer, system_dark))
-        .child(behavior_card(s, k, &mut layer))
-        .child(shortcuts_card(s, k));
+        .h_full()
+        .fill(k.c.bg_base)
+        .child(topbar(s, k, insets))
+        .child(
+            row()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .child(rail(s, k))
+                .child(el().w(1.0).h_full().fill(k.c.border_muted))
+                .child(main),
+        );
 
-    let toolbar = toolbar(s, k, insets, app_menu);
-    let shell = SplitView::new(main)
-        .sidebar(&s.sidebar, |s: &mut Ui| &mut s.sidebar, sidebar)
-        .inspector(&s.inspector, |s: &mut Ui| &mut s.inspector, inspector)
-        .toolbar(toolbar)
-        .titlebar_inset(cx.titlebar_inset())
-        .build(k)
-        .on_drop_files(|s: &mut Ui, paths: &[std::path::PathBuf], _| {
-            if s.config.device.is_empty() {
-                s.log(t(&s.locale, "logs.noDeviceForDragDrop").to_string());
-                return;
-            }
-            for path in paths {
-                s.handle_file(path.clone());
-            }
-        });
-
+    settings_drawer(s, k, &mut layer, system_dark);
     connect_dialog(s, k, &mut layer);
     about_dialog(s, k, &mut layer);
     end_adb_dialog(s, k, &mut layer);

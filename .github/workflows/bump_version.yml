@@ -8,47 +8,50 @@ on:
         required: true
         default: 'patch'
         type: choice
-        options: [ patch, minor, major ]
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   bump:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Git config
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump version
+      # Updates rune-app/Cargo.toml AND Cargo.lock so the resulting PR never
+      # leaves a stale lockfile behind (all builds use --locked).
+      - name: Bump version + lockfile
         id: version
-        run: |
-          OLD=$(sed -n 's/^version = "\(.*\)"/\1/p' rune-app/Cargo.toml | head -1)
-          IFS=. read -r MAJOR MINOR PATCH <<< "$OLD"
-          case "${{ github.event.inputs.bump_type }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            *) PATCH=$((PATCH + 1)) ;;
-          esac
-          NEW="$MAJOR.$MINOR.$PATCH"
-          sed -i "0,/^version = \".*\"/s//version = \"$NEW\"/" rune-app/Cargo.toml
-          echo "NEW_VERSION=$NEW" >> $GITHUB_ENV
+        run: python scripts/bump_version.py "${{ inputs.bump_type }}" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: bump version to v${{ env.NEW_VERSION }}"
-          branch: "chore/version-bump-v${{ env.NEW_VERSION }}"
-          title: "chore: bump version to v${{ env.NEW_VERSION }}"
-          body: "Bumping version to v${{ env.NEW_VERSION }} (`rune-app/Cargo.toml`)"
+          commit-message: "chore: bump version to v${{ steps.version.outputs.version }}"
+          branch: "chore/version-bump-v${{ steps.version.outputs.version }}"
+          title: "chore: bump version to v${{ steps.version.outputs.version }}"
+          body: |
+            Bumping `scrcpy-gui` to v${{ steps.version.outputs.version }} in
+            `rune-app/Cargo.toml` and `Cargo.lock`.
+
+            Merging this PR triggers the automatic tag and draft release.
           labels: |
             version-bump
             automated-pr

@@ -2,15 +2,23 @@ name: Pull Request CI
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-22.04, windows-latest ]
+        os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -19,6 +27,11 @@ jobs:
         with:
           toolchain: 1.99.1
           components: clippy, rustfmt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -31,22 +44,14 @@ jobs:
             libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
             libudev-dev libasound2-dev
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      # scripts/check.py is the single gate definition: fmt, clippy, --locked
+      # tests/build, repo consistency checks, i18n catalogs and all six
+      # structural fixture scenes. PNG goldens depend on font rasterisation and
+      # were captured on Windows, so only the Windows leg runs them.
+      - name: Full gate (Linux, no PNG goldens)
+        if: runner.os == 'Linux'
+        run: python scripts/check.py --no-golden
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets
-
-      - name: Build
-        run: cargo build --all-targets
-
-      - name: Structural visual check
-        run: python scripts/visual_tree_check.py compare-dark
-
-      # Font rasterisation is platform-specific; goldens were captured on Windows.
-      - name: Golden image regression (Windows)
+      - name: Full gate + PNG goldens (Windows)
         if: runner.os == 'Windows'
-        run: python scripts/visual_image_check.py --max-mae 8
+        run: python scripts/check.py

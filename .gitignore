@@ -1,47 +1,38 @@
-# Node / Vite
-node_modules
-dist
-dist-ssr
-*.local
-.npm
-.eslintcache
-
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-# OS / IDE
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-Thumbs.db
-
-# Scrcpy Binaries (Don't upload binaries to GitHub)
-scrcpy-bin/
-scrcpy_temp.zip
-scrcpy_temp.tar.gz
-
-# Env
-.env
-.env.*
-
-# AI Handoff
-history/
+# Python (visual regression scripts)
+__pycache__/
+*.py[cod]
+.pytest_cache/
 
 # Rust build output
 target/
 *.pdb
 
+# Headless render artefacts
+out.png
+tree.json
+script.json
+
 # Generated visual diff reports
 tests/visual/out/
+
+# scrcpy binaries and downloads (never commit binaries)
+scrcpy-bin/
+scrcpy_temp.zip
+scrcpy_temp.tar.gz
+
+# Local settings / secrets
+.env
+.env.*
+
+# OS / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.sw?
+
+# Scratch / agent handoff
+history/
+*.local
