@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use rune::prefs::Prefs;
 use rune::{Taskbar, TaskbarProgress, TextEdit, Waker};
+use rune_kit::PaneState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -147,6 +148,15 @@ pub struct Ui {
     pub transport: Transport,
     pub adb_menu: bool,
     pub confirm_kill_adb: bool,
+    /// Shell panes (official `SplitView`): width and collapsed state survive in memory.
+    pub sidebar: PaneState,
+    pub inspector: PaneState,
+    /// The Connect / pair dialog.
+    pub connect_open: bool,
+    /// The About dialog.
+    pub about_open: bool,
+    /// The toolbar overflow menu.
+    pub app_menu: bool,
     pub ip: TextEdit,
     pub pair_ip: TextEdit,
     pub pair_code: TextEdit,
@@ -175,8 +185,6 @@ pub struct Ui {
     /// The saved GUI window place; `None` on first launch.
     window_placement: Option<SavedWindow>,
     last_taskbar: Option<Taskbar>,
-    pub accent: usize,
-    pub theme: String,
     pub locale: String,
     pub scrcpy_ok: Option<bool>,
     pub scrcpy_message: String,
@@ -184,7 +192,6 @@ pub struct Ui {
     update_path: Option<String>,
     pub download: Download,
     pub waker: Option<Waker>,
-    pub noise: rune::Pixels,
     /// Set by `--scene compare-*`; freezes all asynchronous data for deterministic rendering.
     pub fixture: bool,
 }
@@ -197,20 +204,6 @@ fn default_config() -> ScrcpyConfig {
         vsync: Some(true),
         ..ScrcpyConfig::default()
     }
-}
-
-fn noise_texture() -> rune::Pixels {
-    let pixels = rune::Pixels::new();
-    let (w, h) = (1200u32, 890u32);
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    let mut seed = 0x1357_9bdfu32;
-    for _ in 0..w * h {
-        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        let a = ((seed >> 24) as f32 / 255.0 * 102.0) as u8;
-        rgba.extend_from_slice(&[255, 255, 255, a]);
-    }
-    pixels.set(w, h, rgba);
-    pixels
 }
 
 impl Default for Ui {
@@ -229,7 +222,6 @@ impl Default for Ui {
         let panel_on_top: bool = prefs.get("panel_on_top").unwrap_or(false);
         let window_placement: Option<SavedWindow> = prefs.get("window");
         let locale: String = prefs.get("locale").unwrap_or_else(|| "zh-CN".into());
-        let theme: String = prefs.get("theme").unwrap_or_else(|| "ultraviolet".into());
         let history: Vec<String> = prefs.get("history").unwrap_or_default();
         let remember_position: bool = prefs.get("remember_position").unwrap_or(true);
         Self {
@@ -248,6 +240,11 @@ impl Default for Ui {
             transport: Transport::Usb,
             adb_menu: false,
             confirm_kill_adb: false,
+            sidebar: PaneState::new(286.0).range(220.0, 380.0),
+            inspector: PaneState::new(308.0).range(240.0, 420.0),
+            connect_open: false,
+            about_open: false,
+            app_menu: false,
             ip: TextEdit::new(""),
             pair_ip: TextEdit::new(""),
             pair_code: TextEdit::new(""),
@@ -272,8 +269,6 @@ impl Default for Ui {
             panel_on_top,
             window_placement,
             last_taskbar: None,
-            accent: 0,
-            theme,
             locale,
             scrcpy_ok: None,
             scrcpy_message: String::new(),
@@ -281,7 +276,6 @@ impl Default for Ui {
             update_path: None,
             download: Download::default(),
             waker: None,
-            noise: noise_texture(),
             fixture: false,
         }
     }
@@ -290,14 +284,9 @@ impl Default for Ui {
 impl Ui {
     /// Fixed data for `cargo run -- --scene compare-*`; no ADB, no clock, no prefs.
     pub fn apply_fixture(&mut self, light: bool, tab: SessionKind) {
-        self.apply_fixture_theme(light, tab, "ultraviolet");
-    }
-
-    pub fn apply_fixture_theme(&mut self, light: bool, tab: SessionKind, theme: &'static str) {
         self.fixture = true;
         self.dark = !light;
         self.color_mode = if light { "light" } else { "dark" }.into();
-        self.theme = theme.into();
         self.locale = "zh-CN".into();
         self.tab = tab;
         self.transport = Transport::Usb;
@@ -549,11 +538,6 @@ impl Ui {
             "dark" => true,
             _ => system_dark,
         }
-    }
-
-    pub fn set_theme(&mut self, theme: &str) {
-        self.theme = theme.to_string();
-        let _ = self.prefs.set("theme", &self.theme);
     }
 
     pub fn set_locale(&mut self, locale: &str) {
@@ -1094,7 +1078,6 @@ impl Ui {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "localStorage": {
                 "scrcpy_config": serde_json::to_string(&self.config).unwrap_or_default(),
-                "scrcpy_theme": self.theme,
                 "scrcpy_color_mode": self.color_mode,
                 "scrcpy_locale": self.locale,
                 "scrcpy_history": serde_json::to_string(&self.history).unwrap_or_default(),

@@ -1,5 +1,5 @@
+mod kit;
 pub mod state;
-mod views;
 
+pub use kit::view;
 pub use state::Ui;
-pub use views::view;

@@ -16,9 +16,10 @@ Node toolchain, and no mocked backend.
   CI checks.
 - `cargo build --release -p scrcpy-gui` — release binary.
 - `python scripts/visual_tree_check.py compare-dark` — structural visual gate:
-  renders a deterministic fixture scene and asserts key rects, colours and type
-  from Rune's `--tree`. Scenes: `compare-dark`, `compare-light`,
-  `compare-camera`, `compare-desktop`.
+  renders a deterministic fixture scene and asserts the rune-kit shell, pane
+  geometry and key controls from Rune's `--tree`. Scenes: `compare-dark`,
+  `compare-light`, `compare-camera`, `compare-desktop`, `compare-en`,
+  `compare-empty`.
 - `python scripts/visual_image_check.py` — golden PNG regression (use `--bless`
   to update goldens); `python scripts/visual_diff.py A.png B.png` — generic PNG
   diff. See `tests/visual/README.md` for the old-vs-new differential procedure.
@@ -42,16 +43,19 @@ the `windows` crate independently of Rune's patched dependency set.
 - `rune-app/src/ui/state.rs`: `Ui` state + async bridge. Async commands run on a
   tokio runtime; results and backend events go through an unbounded channel,
   `EventSink` wakes Rune, and `Ui::poll` applies changes on the UI thread.
-- `rune-app/src/ui/views.rs`: the Rune view tree (Header / Sidebar / ControlPanel
-  / SessionBehavior / LogPanel / Footer / onboarding overlay) built with
-  `rune-kit` components.
+- `rune-app/src/ui/kit.rs`: the rune-kit shell (`App::titlebar` + `SplitView`
+  sidebar/main/inspector + `Toolbar`), the official OpenCode theme and the form
+  controls; custom pieces are the console, file-drop target and scrcpy icons.
+- `rune-app/src/ui/state.rs` holds `PaneState`s, appearance (`color_mode`),
+  `panel_on_top`, `connect_open`/`about_open`, and the async bridge.
 - `rune-app/src/platform/`: global shortcut handlers and the Windows-only
   borderless-window drag hook (previously `grab.rs` + Tauri shortcuts plugin).
 - `rune-app/src/i18n.rs` + `catalogs/`: all eight locales exported verbatim from
   the old TS bundles, with English fallback and `{var}` interpolation.
 
 Settings live in `rune::prefs::Prefs` (`com.kb.scrcpy-gui`), not localStorage.
-Settings keys: `config`, `dark`, `theme`, `locale`, `history`.
+Settings keys: `config`, `color_mode` (legacy `dark` still readable),
+`panel_on_top`, `window`, `locale`, `history`.
 
 ## Event contract
 
@@ -72,7 +76,7 @@ Backend events keep their old names so the ported logic stays recognisable:
   closing the window leaves the process in the notification area; the tray Quit
   calls `on_quit`, which kills scrcpy children synchronously. macOS has no tray in
   this Rune rev; Linux gets one only where a tray host runs.
-- The header pin sets the GUI window's `panel_on_top` via
+- The appearance card's pin sets the GUI window's `panel_on_top` via
   `WindowHandle::set_always_on_top`; it is unrelated to scrcpy's
   `config.always_on_top` (`--always-on-top`). Taskbar Busy/badge state is pushed
   from `Ui::poll` through `WindowHandle::set_taskbar`.
@@ -90,14 +94,13 @@ Backend events keep their old names so the ported logic stays recognisable:
 - Wireless history: 10 newest-first `ip:port` entries, 25 s reconnect loop.
 - Update check (once per path), ThemedModal-style update dialog, report export.
 - 9-pass / 2 s device+mDNS settle polling with a shared busy guard.
-- Full 8-locale catalogs, five theme palettes, dark/light tokens, noise + glow,
-  window-wide file drag-and-drop, terminal timestamps and the 220 px console.
+- Full 8-locale catalogs, the official OpenCode light/dark/system appearance,
+  window-wide file drag-and-drop, terminal timestamps and the console card.
 
 ## Remaining differences
 
-- The pairing modal's 2 s polling while waiting for an mDNS pairing broadcast
-  is not reproduced; the inline pair form works but has no waiting dialog.
+- The pairing dialog has no 2 s mDNS waiting state; the inline pair form works.
 - The crash `ErrorBoundary` screen is gone (Rust panics are not caught in-view).
-- Noise is a generated pixel layer rather than the original tiled SVG; light
-  mode does not reproduce the old `.glass` CSS cascade asymmetry exactly.
+- The old noise/glass/glow layers and five palettes are gone with the official
+  theme; the drop target has no hover highlight (the window-wide drop works).
 - A real device/scrcpy session has not been exercised end-to-end here.

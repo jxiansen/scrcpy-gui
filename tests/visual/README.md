@@ -13,8 +13,9 @@ styles and text from Rune's `--tree` JSON. This is the hard gate because it is
 immune to font rasterisation differences.
 
 Fixtures (set with `--scene`): `compare-dark`, `compare-light`, `compare-camera`,
-`compare-desktop`. They freeze theme, mode, locale, device/mDNS lists, logs and
-the terminal timestamp, and skip all ADB/Prefs work.
+`compare-desktop`, `compare-en`, `compare-empty`. They freeze appearance, locale,
+device/mDNS lists, session mode, logs and the terminal timestamp, and skip all
+ADB/Prefs work.
 
 ## Layer 2 — golden PNG regression
 
@@ -23,7 +24,7 @@ python scripts/visual_image_check.py            # compare with committed goldens
 python scripts/visual_image_check.py --bless    # update goldens after a deliberate change
 ```
 
-Renders the same four fixtures with `--snap`, compares each 2400×1780 PNG with
+Renders the same six fixtures with `--snap`, compares each 2400×1780 PNG with
 `tests/visual/golden/<scene>.png`, and writes a heatmap + JSON report to
 `tests/visual/out/<scene>/`. Threshold: MAE ≤ 8 (default). `scripts/visual_diff.py`
 is a dependency-free PNG decoder/differ (stdlib only) and can compare any two
@@ -47,7 +48,7 @@ the same fixture data. It was produced by:
    so the UI renders without the Tauri shell.
 3. `npm run dev -- --port 1431 --strictPort`, then in the browser: set viewport
    1200×890 @2x, `colorScheme: dark`, inject the same localStorage fixture
-   (`scrcpy_theme=ultraviolet`, `scrcpy_color_mode=dark`, `scrcpy_locale=zh-CN`,
+   (`scrcpy_color_mode=dark`, `scrcpy_locale=zh-CN`,
    `scrcpy_config` with the fixed device), reload and screenshot at device scale.
 
 Reproduce the differential:
@@ -57,10 +58,10 @@ python scripts/visual_diff.py tests/visual/reference/old-ui-dark.png \
   tests/visual/golden/compare-dark.png --out-dir tests/visual/out/old-vs-new
 ```
 
-The latest run: MAE **18.20**, 26.6% of pixels over threshold. Hot cells are the
-engine-configuration area (start button inside vs. outside the card, `hwdec`
-visibility) and the console/right rail. These are known structural differences,
-not regressions; use the heatmap in `out/old-vs-new/diff.png` to drive fixes.
+After the rune-kit shell migration the old-vs-new diff is expected to be large:
+the three-column chrome, typography and controls were intentionally replaced.
+Use it as a reference/heatmap, not as a regression gate; the rune-kit structural
+checks and the new goldens are the gates.
 
 Note: the reference contains a real-time log timestamp, so one line will always
 differ from the fixed `12:34:56` fixture timestamp.

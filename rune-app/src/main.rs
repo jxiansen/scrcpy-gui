@@ -15,7 +15,6 @@ mod backend;
 mod i18n;
 mod icons;
 mod platform;
-mod theme;
 mod ui;
 
 use rune::prefs::Prefs;
@@ -40,25 +39,18 @@ fn scene_desktop(s: &mut Ui) {
     s.apply_fixture(false, SessionKind::Desktop);
 }
 
-fn scene_bloodmoon(s: &mut Ui) {
-    s.apply_fixture_theme(false, SessionKind::Mirror, "bloodmoon");
-}
-
-fn scene_emerald(s: &mut Ui) {
-    s.apply_fixture_theme(false, SessionKind::Mirror, "emerald");
-}
-
-fn scene_astro(s: &mut Ui) {
-    s.apply_fixture_theme(false, SessionKind::Mirror, "astro");
-}
-
-fn scene_carbon(s: &mut Ui) {
-    s.apply_fixture_theme(false, SessionKind::Mirror, "carbon");
-}
-
 fn scene_en(s: &mut Ui) {
     s.apply_fixture(false, SessionKind::Mirror);
     s.set_locale("en");
+}
+
+fn scene_empty(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Mirror);
+    s.devices.clear();
+    s.mdns.clear();
+    s.history.clear();
+    s.logs.clear();
+    s.config.device.clear();
 }
 
 fn setup(ui: &mut Ui, waker: Waker) {
@@ -98,16 +90,15 @@ fn main() {
         min_size: Some((1080.0, 760.0)),
         setup: Some(setup),
         poll: Some(poll),
+        fonts: rune_theme_opencode::FONTS,
+        families: rune_theme_opencode::FAMILIES,
         scenes: &[
             ("compare-dark", scene_dark),
             ("compare-light", scene_light),
             ("compare-camera", scene_camera),
             ("compare-desktop", scene_desktop),
-            ("compare-bloodmoon", scene_bloodmoon),
-            ("compare-emerald", scene_emerald),
-            ("compare-astro", scene_astro),
-            ("compare-carbon", scene_carbon),
             ("compare-en", scene_en),
+            ("compare-empty", scene_empty),
         ],
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)
     };
@@ -135,6 +126,7 @@ fn main() {
     }
 
     let mut app = rune::App::new(spec)
+        .titlebar(rune::Titlebar::new(44.0))
         .window_options(window_options)
         .global_shortcut("ctrl+alt+shift+c", platform::shortcuts::recenter);
 

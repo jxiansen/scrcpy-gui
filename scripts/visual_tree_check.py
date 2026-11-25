@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Structural visual regression check for the Rune UI.
+"""Structural visual regression check for the rune-kit shell UI.
 
-Renders a deterministic `--scene` and asserts key geometry, colours and type
-from Rune's `--tree` JSON. Unlike a PNG diff this is immune to font rasteriser
-differences, so it is suitable as a hard CI gate.
+Renders a deterministic `--scene` and asserts the shell/sidebar/main/inspector
+geometry and the key controls from Rune's `--tree` JSON. This is the hard CI
+gate; the PNG check is the softer pixel-regression layer.
 
 Usage:  python scripts/visual_tree_check.py [scene]   (default: compare-dark)
 """
@@ -18,34 +18,67 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOL = 0.5
+SHELL = "rune-frame/kit-root/shell/split"
 
 EXPECTED_RECTS = {
-    "kit-root/window": [0, 0, 1200, 890],
-    "kit-root/window/header": [0, 0, 1200, 56],
-    "kit-root/window/workspace": [0, 56, 1200, 762],
-    "kit-root/window/footer": [0, 818, 1200, 72],
-    "kit-root/window/workspace/sidebar": [24, 72, 270, 722],
-    "kit-root/window/workspace/center": [318, 72, 564, 722],
-    "kit-root/window/workspace/right": [906, 72, 270, 722],
-    "kit-root/window/workspace/center/console": [318, 574, 564, 220],
-    "kit-root/window/workspace/center/start-stop": [318, 506, 564, 52],
+    "rune-frame": [0, 0, 1200, 890],
+    SHELL: [0, 0, 1200, 890],
+    f"{SHELL}/sidebar-pane": [0, 0, 286, 890],
+    f"{SHELL}/sidebar-pane/pane-content/pane-body/sidebar": [0, 48, 286, 842],
+    f"{SHELL}/main-column/toolbar": [286, 0, 914, 48],
+    f"{SHELL}/main-column/main-row/main-pane": [286, 48, 606, 834],
+    f"{SHELL}/main-column/main-row/main-pane/main-content": [286, 48, 606, 834],
+    f"{SHELL}/main-column/main-row/main-pane/main-content/engine": [302, 108, 574, 397],
+    f"{SHELL}/main-column/main-row/main-pane/main-content/start-stop": [302, 521, 574, 36],
+    f"{SHELL}/main-column/main-row/main-pane/main-content/console": [302, 573, 574, 233],
+    f"{SHELL}/main-column/main-row/inspector-pane": [892, 48, 308, 842],
+    f"{SHELL}/main-column/main-row/inspector-pane/pane-content/pane-body/inspector/appearance": [908, 64, 276, 133],
+    f"{SHELL}/main-column/main-row/inspector-pane/pane-content/pane-body/inspector/behavior": [908, 213, 276, 257],
+    f"{SHELL}/main-column/main-row/inspector-pane/pane-content/pane-body/inspector/shortcuts": [908, 486, 276, 189],
 }
 
-EXPECTED_FILLS = {
-    "kit-root/window": "#08080aff",       # ultraviolet dark bg
-    "kit-root/window/workspace/center/console": "#09090bf0",
-    "kit-root/window/workspace/center/start-stop": "#8b5cf6ff",
+EXPECTED_TEXT_ZH = (
+    "ScrcpyGUI",
+    "屏幕",
+    "摄像头",
+    "桌面",
+    "系统控制台",
+    "设备中心",
+    "主题",
+    "行为设置",
+    "快捷键",
+)
+
+EXPECTED_TEXT_EN = (
+    "ScrcpyGUI",
+    "Screen",
+    "Camera",
+    "Desktop",
+    "System Console",
+    "Device Hub",
+    "Theme",
+    "Session Behavior",
+    "Shortcuts",
+)
+
+# Camera and desktop carry extra configuration rows, so their cards push the
+# session button and console further down the scrollable main column.
+SCENE_RECTS = {
+    "compare-camera": {
+        f"{SHELL}/main-column/main-row/main-pane/main-content/engine": [302, 108, 574, 453],
+        f"{SHELL}/main-column/main-row/main-pane/main-content/start-stop": [302, 577, 574, 36],
+        f"{SHELL}/main-column/main-row/main-pane/main-content/console": [302, 629, 574, 233],
+    },
+    "compare-desktop": {
+        f"{SHELL}/main-column/main-row/main-pane/main-content/engine": [302, 108, 574, 445],
+        f"{SHELL}/main-column/main-row/main-pane/main-content/start-stop": [302, 569, 574, 36],
+        f"{SHELL}/main-column/main-row/main-pane/main-content/console": [302, 621, 574, 233],
+    },
 }
 
-EXPECTED_RADII = {
-    "kit-root/window/workspace/center/console": 16.0,
-    "kit-root/window/workspace/center/start-stop": 16.0,
-}
-
-EXPECTED_TEXT = {
-    "SCRCPY": {"size": 28.0, "weight": 900.0, "tracking": -1.4, "italic": True},
-    "GUI": {"size": 28.0, "weight": 900.0, "tracking": -1.4, "italic": False},
-    "V4.1.0": {"size": 10.0, "weight": 900.0, "tracking": 0.6},
+SCENE_START_TEXT = {
+    "compare-camera": ("启用摄像头", "Enable Camera"),
+    "compare-desktop": ("投射到桌面", "Cast to Desktop"),
 }
 
 RAW_KEY_PREFIXES = (
@@ -98,51 +131,44 @@ def main() -> int:
             check(f"{path}.rect[{i}]", abs(float(a) - float(e)) <= TOL, True)
 
     check("viewport", tree.get("viewport"), [1200.0, 890.0])
-    for path, rect in EXPECTED_RECTS.items():
+    check("tree warnings", tree.get("warnings"), [])
+    for path, rect in {**EXPECTED_RECTS, **SCENE_RECTS.get(scene, {})}.items():
         check_rect(path, rect)
-    for path, fill in EXPECTED_FILLS.items():
-        el = by_path.get(path)
-        if el is None:
-            failures.append(f"missing element: {path}")
-        else:
-            check(f"{path}.fill", el.get("fill"), fill)
-    for path, radius in EXPECTED_RADII.items():
-        el = by_path.get(path)
-        if el is None:
-            failures.append(f"missing element: {path}")
-        else:
-            check(f"{path}.radius", el.get("radius"), radius)
 
-    for text, expected_style in EXPECTED_TEXT.items():
-        candidates = [e for e in elements if e.get("text") == text]
-        if not candidates:
-            failures.append(f"missing text: {text}")
-            continue
-        style = candidates[0].get("textStyle") or {}
-        for key, value in expected_style.items():
-            check(f"text[{text}].{key}", style.get(key), value)
+    start = by_path.get(f"{SHELL}/main-column/main-row/main-pane/main-content/start-stop")
+    if start is None:
+        failures.append("missing start-stop")
+    else:
+        check("start-stop.role", start.get("role"), "button")
+
+    texts = [e.get("text") for e in elements if isinstance(e.get("text"), str)]
+    english = scene == "compare-en"
+    expected_text = EXPECTED_TEXT_EN if english else EXPECTED_TEXT_ZH
+    for expected in expected_text:
+        check(f"text[{expected}]", expected in texts, True)
+    zh_start, en_start = SCENE_START_TEXT.get(scene, ("开始", "Start Mission"))
+    start_text = en_start if english else zh_start
+    check(f"text[{start_text}]", start_text in texts, True)
+    check("session target line present", "706fc5a1 · USB" in texts, scene != "compare-empty")
 
     leaked = [
-        e.get("text")
-        for e in elements
-        if isinstance(e.get("text"), str)
-        and (e["text"] == "?" or e["text"].startswith(RAW_KEY_PREFIXES))
+        t for t in texts
+        if t == "?" or t.startswith(RAW_KEY_PREFIXES)
     ]
     check("no untranslated/raw-key text", leaked, [])
 
     if scene == "compare-en":
         cjk = [
-            e.get("text")
-            for e in elements
-            if isinstance(e.get("text"), str)
-            and any("\u4e00" <= ch <= "\u9fff" for ch in e["text"])
+            t for t in texts
+            if any("\u4e00" <= ch <= "\u9fff" for ch in t)
         ]
         check("English scene has no Chinese text", cjk, [])
 
-    diamonds = [e.get("text") for e in elements if e.get("text") == "◆"]
-    check("no missing-glyph diamonds in shortcut grid", diamonds, [])
-    targets = [e for e in elements if e.get("text") == "706fc5a1 · USB"]
-    check("session target line present", len(targets) > 0, True)
+    if scene == "compare-empty":
+        if start is None:
+            failures.append("missing start-stop for empty scene")
+        else:
+            check("start-stop disabled with no device", start.get("focusable"), False)
 
     if failures:
         print(f"FAIL [{scene}] {len(failures)} of {checked} checks failed:")

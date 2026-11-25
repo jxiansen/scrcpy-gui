@@ -16,7 +16,7 @@ const QUIT: &str = "quit";
 
 /// Starts the tray; keep the returned `Tray` alive for as long as the app runs.
 pub fn start(handle: AppHandle<Ui>) -> Option<Tray> {
-    let spec = TraySpec::new("com.kb.scrcpy-gui", "ScrcpyGUI", purple_dot(32))
+    let spec = TraySpec::new("com.kb.scrcpy-gui", "ScrcpyGUI", accent_dot(32))
         .tooltip("ScrcpyGUI")
         .menu(vec![
             TrayItem::action(SHOW, "Show ScrcpyGUI"),
@@ -47,8 +47,8 @@ pub fn start(handle: AppHandle<Ui>) -> Option<Tray> {
     }
 }
 
-/// The app's accent purple as a round, antialiased RGBA dot (straight alpha).
-fn purple_dot(size: u32) -> TrayIcon {
+/// The OpenCode theme accent as a round, antialiased RGBA dot (straight alpha).
+fn accent_dot(size: u32) -> TrayIcon {
     let mut rgba = vec![0u8; (size * size * 4) as usize];
     let centre = (size as f32 - 1.0) / 2.0;
     let radius = size as f32 * 0.42;
@@ -59,7 +59,7 @@ fn purple_dot(size: u32) -> TrayIcon {
             let alpha = (radius - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
             if alpha > 0.0 {
                 let at = ((y * size + x) * 4) as usize;
-                rgba[at] = 0x8b;
+                rgba[at] = 0x3b;
                 rgba[at + 1] = 0x5c;
                 rgba[at + 2] = 0xf6;
                 rgba[at + 3] = (alpha * 255.0).round() as u8;

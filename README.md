@@ -14,7 +14,7 @@ no webview, no Node.js build step and no mocked backend.
 
 ## Features
 
-- Native GPU UI with smooth springs, dark/light appearance and accent colours
+- Native GPU UI with the official Rune/OpenCode theme, light/dark/system appearance
 - USB and wireless device discovery, Android 11+ pairing, Wi-Fi reconnect
 - Screen mirroring, camera (webcam) and virtual-display desktop sessions
 - Bitrate / FPS / resolution / codec / renderer / hardware-decoding controls
