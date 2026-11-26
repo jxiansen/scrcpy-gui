@@ -73,3 +73,11 @@ svg_icon!(
     PIN,
     r#"<path d="M5 2h6M6.4 2v2.3c0 .6-.3 1.2-.8 1.6l-.9.7c-.5.4-.3 1.2.3 1.2h6c.6 0 .8-.8.3-1.2l-.9-.7c-.5-.4-.8-1-.8-1.6V2" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" fill="none"/><path d="M8 8.1v5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#
 );
+
+/// Full brand glyph — the same "phone → screen" arrow used by the tray, the
+/// executable resource and the README. 512-unit viewBox, scaled by the caller.
+pub static BRAND: Icon = Icon {
+    name: "brand",
+    view: 512.0,
+    body: r##"<rect width="512" height="512" rx="112" fill="#0D1117"/><g stroke="currentColor" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none"><rect x="108" y="168" width="88" height="176" rx="22"/><rect x="292" y="212" width="112" height="88" rx="16"/><path d="M348 300v40"/><path d="M312 340h72"/><path d="M196 256h64"/><path d="M238 230l38 26-38 26"/></g>"##,
+};

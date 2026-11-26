@@ -1286,13 +1286,7 @@ fn topbar(s: &Ui, k: &Kit, insets: rune::ChromeInsets) -> El {
     let brand = row()
         .gap(8.0)
         .center_y()
-        .child(
-            el().size(22.0, 22.0)
-                .radius(6.0)
-                .fill(k.c.layer_02)
-                .center()
-                .child(rune::icon(&icons::PHONE, 13.0).color(k.c.icon_base)),
-        )
+        .child(rune::icon(&icons::BRAND, 22.0))
         .child(text("ScrcpyGUI").font(k.ty.ui_medium).color(k.c.text_base));
     let settings = IconButton::new(&icons::GEAR)
         .variant(IconButtonVariant::GhostMuted)

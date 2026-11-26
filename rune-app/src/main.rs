@@ -175,6 +175,12 @@ fn main() {
         .on_quit(on_quit)
         .on_close(on_close);
 
+    // Rune doesn't load the executable's icon resource by itself: without this
+    // the title bar, taskbar and Alt+Tab show Windows' default window icon.
+    // Use the same mirroring glyph as the tray (tray-icon.rgba) and README.
+    rune::set_app_icon(include_bytes!("../icons/app-icon.png"))
+        .expect("failed to set the application icon");
+
     app.run();
     drop(tray);
     if !headless {
