@@ -5,6 +5,7 @@ use rune::Icon;
 
 macro_rules! svg_icon {
     ($name:ident, $body:expr) => {
+        #[allow(dead_code)] // catalog icon, not all are drawn by every app
         pub static $name: Icon = Icon {
             name: stringify!($name),
             view: 16.0,

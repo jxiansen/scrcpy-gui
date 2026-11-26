@@ -71,6 +71,7 @@ impl EventSink {
 pub struct ScrcpyState {
     pub processes: Mutex<HashMap<String, Child>>,
     pub active_device: Mutex<Option<String>>,
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub final_capture_hint: Mutex<HashMap<String, (i32, i32)>>,
 }
 

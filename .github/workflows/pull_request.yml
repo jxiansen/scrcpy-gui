@@ -45,7 +45,7 @@ jobs:
             libudev-dev libasound2-dev
 
       # scripts/check.py is the single gate definition: fmt, clippy, --locked
-      # tests/build, repo consistency checks, i18n catalogs and all six
+      # tests/build, repo consistency checks, i18n catalogs and all seven
       # structural fixture scenes. PNG goldens depend on font rasterisation and
       # were captured on Windows, so only the Windows leg runs them.
       - name: Full gate (Linux, no PNG goldens)

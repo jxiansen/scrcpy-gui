@@ -1,20 +1,36 @@
 use super::{EventSink, ScrcpyState};
 use serde_json::json;
+use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tar::Archive;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
 const AUDIO_FALLBACK_CHAIN: &[&str] = &["aac", "flac", "raw"];
+
+/// ADB device listings/pairing must never hang the async bridge forever.
+const ADB_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const ADB_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_PAIR_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Console commands are read incrementally; the transcript is capped so a
+/// runaway command cannot grow the UI transcript without bound.
+const MAX_CONSOLE_OUTPUT: usize = 1024 * 1024;
+const CONSOLE_TIMEOUT: Duration = Duration::from_secs(120);
+const AUDIO_FALLBACK_DELAY: Duration = Duration::from_millis(250);
 
 fn is_audio_codec_error(text: &str) -> bool {
     let lower = text.to_lowercase();
@@ -32,17 +48,28 @@ fn is_audio_codec_error(text: &str) -> bool {
     mentions_codec && mentions_failure
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-fn get_binary_path(binary_name: &str, custom_folder: Option<String>) -> String {
+fn binary_filename(binary_name: &str) -> String {
     let exe_ext = std::env::consts::EXE_EXTENSION;
-    let binary_filename = if exe_ext.is_empty() {
+    if exe_ext.is_empty() {
         binary_name.to_string()
     } else {
         format!("{}.{}", binary_name, exe_ext)
-    };
+    }
+}
+
+/// Development convenience only: a release build must not execute binaries
+/// found next to whatever directory it happened to be started in.
+fn include_cwd_scrcpy_bin() -> bool {
+    cfg!(debug_assertions)
+}
+
+fn get_binary_path(binary_name: &str, custom_folder: Option<String>) -> String {
+    let binary_filename = binary_filename(binary_name);
 
     // 1. Check custom folder if provided
     if let Some(folder) = custom_folder {
@@ -64,11 +91,14 @@ fn get_binary_path(binary_name: &str, custom_folder: Option<String>) -> String {
         }
     }
 
-    // 3. Fallback to current working directory scrcpy-bin
-    if let Ok(current_dir) = std::env::current_dir() {
-        let local_bin = current_dir.join("scrcpy-bin").join(&binary_filename);
-        if local_bin.exists() && local_bin.is_file() {
-            return local_bin.to_string_lossy().to_string();
+    // 3. Fallback to current working directory scrcpy-bin. Only in debug
+    // builds: release binaries must not pick up executables from the cwd.
+    if include_cwd_scrcpy_bin() {
+        if let Ok(current_dir) = std::env::current_dir() {
+            let local_bin = current_dir.join("scrcpy-bin").join(&binary_filename);
+            if local_bin.exists() && local_bin.is_file() {
+                return local_bin.to_string_lossy().to_string();
+            }
         }
     }
 
@@ -76,74 +106,27 @@ fn get_binary_path(binary_name: &str, custom_folder: Option<String>) -> String {
     binary_name.to_string()
 }
 
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
-    let src_ref = src.as_ref();
-    let dst_ref = dst.as_ref();
-
-    // Canonicalize dst path if it exists to get absolute base path
-    let canonical_dst = if dst_ref.exists() {
-        dst_ref.canonicalize()?
-    } else {
-        std::fs::create_dir_all(dst_ref)?;
-        dst_ref.canonicalize()?
-    };
-
-    for entry in std::fs::read_dir(src_ref)? {
-        let entry = entry?;
-        let entry_path = entry.path();
-        let file_name = entry.file_name();
-
-        // Prevent directory traversal elements in entry name
-        let file_name_str = file_name.to_string_lossy();
-        if file_name_str.contains("..")
-            || file_name_str.contains('/')
-            || file_name_str.contains('\\')
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Directory entry contains directory traversal components",
-            ));
-        }
-
-        let target_path = dst_ref.join(&file_name);
-
-        // Ensure destination path is strictly within the target base directory
-        if let Some(parent_dir) = target_path.parent() {
-            if parent_dir.exists() {
-                let canonical_parent = parent_dir.canonicalize()?;
-                if !canonical_parent.starts_with(&canonical_dst)
-                    && canonical_parent != canonical_dst
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "Path traversal attempt detected during directory copy",
-                    ));
-                }
-            }
-        }
-
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(&entry_path, &target_path)?;
-        } else {
-            std::fs::copy(&entry_path, &target_path)?;
-        }
-    }
-    Ok(())
+/// Absolute System32 path for OS tools, so a hostile `PATH` entry cannot
+/// shadow `taskkill`.
+#[cfg(target_os = "windows")]
+fn system32_tool(tool: &str) -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join(tool)
 }
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 fn create_command<S: AsRef<std::ffi::OsStr>>(program: S) -> TokioCommand {
-    let cmd = TokioCommand::new(program);
+    let mut cmd = TokioCommand::new(program);
+    // A timed-out ADB/scrcpy helper must not outlive its Future.
+    cmd.kill_on_drop(true);
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = cmd;
         cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd
     }
-    #[cfg(not(target_os = "windows"))]
     cmd
 }
 
@@ -219,17 +202,121 @@ fn extract_device_model(line: &str) -> Option<String> {
     Some(model.replace('_', " "))
 }
 
+fn is_emulator_serial(serial: &str) -> bool {
+    serial
+        .strip_prefix("emulator-")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Turns `getprop` output (one value per line) into the display name the UI
+/// shows: the AVD name for emulators, otherwise the market name, or
+/// `manufacturer model` when the market name is empty / model already includes
+/// the manufacturer.
+fn friendly_name_from_getprop(serial: &str, output: &str) -> Option<String> {
+    let parts: Vec<&str> = output.lines().map(str::trim).collect();
+    if is_emulator_serial(serial) {
+        return parts
+            .iter()
+            .find(|s| !s.is_empty())
+            .map(|s| format!("{} ({serial})", s.replace('_', " ")));
+    }
+
+    let market = parts.first().copied().unwrap_or("");
+    let manufacturer = parts.get(1).copied().unwrap_or("");
+    let model = parts.get(2).copied().unwrap_or("");
+    if !market.is_empty() {
+        Some(market.to_string())
+    } else if !manufacturer.is_empty()
+        && !model.is_empty()
+        && !model
+            .to_lowercase()
+            .starts_with(&manufacturer.to_lowercase())
+    {
+        Some(format!("{manufacturer} {model}"))
+    } else if !model.is_empty() {
+        Some(model.to_string())
+    } else {
+        None
+    }
+}
+
+fn friendly_names_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn query_friendly_name(adb_path: &str, serial: &str) -> Option<String> {
+    let command = if is_emulator_serial(serial) {
+        "getprop ro.boot.qemu.avd_name; getprop ro.kernel.qemu.avd_name"
+    } else {
+        "getprop ro.product.marketname; getprop ro.product.manufacturer; getprop ro.product.model"
+    };
+    let output = timeout(
+        ADB_QUERY_TIMEOUT,
+        create_command(adb_path)
+            .arg("-s")
+            .arg(serial)
+            .arg("shell")
+            .arg(command)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    friendly_name_from_getprop(serial, &String::from_utf8_lossy(&output.stdout))
+}
+
+async fn resolve_friendly_names(
+    adb_path: &str,
+    devices: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut resolved = serde_json::Map::new();
+    let mut pending = Vec::new();
+    {
+        let cache = friendly_names_cache().lock().unwrap();
+        for serial in devices {
+            if let Some(name) = cache.get(serial) {
+                resolved.insert(serial.clone(), json!(name));
+            } else {
+                pending.push(serial.clone());
+            }
+        }
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for serial in pending {
+        let adb_path = adb_path.to_string();
+        tasks.spawn(async move {
+            let name = query_friendly_name(&adb_path, &serial).await;
+            (serial, name)
+        });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        if let Ok((serial, Some(name))) = joined {
+            friendly_names_cache()
+                .lock()
+                .unwrap()
+                .insert(serial.clone(), name.clone());
+            resolved.insert(serial, json!(name));
+        }
+    }
+    resolved
+}
+
 pub async fn get_devices(custom_path: Option<String>) -> serde_json::Value {
     let adb_path = get_binary_path("adb", custom_path);
 
-    let output = create_command(&adb_path)
-        .arg("devices")
-        .arg("-l")
-        .output()
-        .await;
+    let output = timeout(
+        ADB_LIST_TIMEOUT,
+        create_command(&adb_path).arg("devices").arg("-l").output(),
+    )
+    .await;
 
     match output {
-        Ok(o) => {
+        Ok(Ok(o)) => {
             if o.status.success() {
                 let out_str = String::from_utf8_lossy(&o.stdout);
                 let mut devices: Vec<String> = Vec::new();
@@ -248,13 +335,23 @@ pub async fn get_devices(custom_path: Option<String>) -> serde_json::Value {
                     devices.push(serial);
                 }
 
-                json!({ "error": false, "devices": devices, "deviceModels": device_models })
+                let friendly = resolve_friendly_names(&adb_path, &devices).await;
+
+                json!({
+                    "error": false,
+                    "devices": devices,
+                    "deviceModels": device_models,
+                    "friendly": friendly
+                })
             } else {
                 json!({ "error": true, "message": "ADB returned error" })
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             json!({ "error": true, "message": e.to_string() })
+        }
+        Err(_) => {
+            json!({ "error": true, "message": "ADB devices timed out after 10s" })
         }
     }
 }
@@ -262,14 +359,17 @@ pub async fn get_devices(custom_path: Option<String>) -> serde_json::Value {
 pub async fn get_mdns_devices(custom_path: Option<String>) -> serde_json::Value {
     let adb_path = get_binary_path("adb", custom_path);
 
-    let output = create_command(&adb_path)
-        .arg("mdns")
-        .arg("services")
-        .output()
-        .await;
+    let output = timeout(
+        ADB_LIST_TIMEOUT,
+        create_command(&adb_path)
+            .arg("mdns")
+            .arg("services")
+            .output(),
+    )
+    .await;
 
     match output {
-        Ok(o) => {
+        Ok(Ok(o)) => {
             if o.status.success() {
                 let out_str = String::from_utf8_lossy(&o.stdout);
                 let mut services = Vec::new();
@@ -296,8 +396,11 @@ pub async fn get_mdns_devices(custom_path: Option<String>) -> serde_json::Value 
                 json!({ "error": true, "message": "ADB mdns returned error" })
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             json!({ "error": true, "message": e.to_string() })
+        }
+        Err(_) => {
+            json!({ "error": true, "message": "ADB mdns timed out after 10s" })
         }
     }
 }
@@ -326,7 +429,7 @@ pub async fn adb_connect(
         .map_err(|e| format!("Failed to start adb connect: {}", e))?;
 
     // Implement 5s timeout
-    let output_res = timeout(Duration::from_secs(5), child.wait_with_output()).await;
+    let output_res = timeout(ADB_CONNECT_TIMEOUT, child.wait_with_output()).await;
 
     match output_res {
         Ok(Ok(output)) => {
@@ -372,13 +475,27 @@ pub async fn adb_pair(
     let adb_path = get_binary_path("adb", custom_path);
     sink.emit("scrcpy-log", format!("[SYSTEM] Pairing with {}...", ip));
 
-    let output = create_command(&adb_path)
-        .arg("pair")
-        .arg(&ip)
-        .arg(&code)
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    let output = timeout(
+        ADB_PAIR_TIMEOUT,
+        create_command(&adb_path)
+            .arg("pair")
+            .arg(&ip)
+            .arg(&code)
+            .output(),
+    )
+    .await;
+
+    let output = match output {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => {
+            sink.emit(
+                "scrcpy-log",
+                format!("[SYSTEM] Pairing with {} timed out after 20s.", ip),
+            );
+            return Ok(json!({ "success": false, "message": "pairing timed out" }));
+        }
+    };
 
     let out_text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let err_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -398,6 +515,7 @@ pub async fn adb_pair(
     )
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub async fn adb_shell(
     device: String,
     command: String,
@@ -421,13 +539,66 @@ pub async fn adb_shell(
     }
 }
 
+/// Set by [`cancel_terminal_command`] so a long console command can be stopped
+/// from the UI without waiting for the 120 s timeout.
+static CONSOLE_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Cancels the in-flight console command. The UI has no cancel button yet, so
+/// the function is kept for that wiring; the timeout and `kill_on_drop` still
+/// ensure a command cannot run forever.
+#[allow(dead_code)]
+pub fn cancel_terminal_command() {
+    CONSOLE_CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// Reads a child pipe incrementally, keeping at most `cap` bytes but always
+/// draining the pipe so the child never blocks on a full buffer.
+async fn read_capped<R: AsyncRead + Unpin>(mut reader: R, cap: usize) -> String {
+    let mut kept = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(kept.len());
+                if room > 0 {
+                    let take = room.min(n);
+                    kept.extend_from_slice(&buf[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let mut text = String::from_utf8_lossy(&kept).to_string();
+    if truncated {
+        text.push_str("\n[output truncated]");
+    }
+    text
+}
+
+enum ConsoleOutcome {
+    Exited(std::process::ExitStatus),
+    Cancelled,
+    Failed(String),
+}
+
 pub async fn run_terminal_command(
     device: Option<String>,
     cmd: String,
     custom_path: Option<String>,
 ) -> serde_json::Value {
-    let mut parts = split_args(&cmd)
-        .unwrap_or_else(|_| cmd.split_whitespace().map(|s| s.to_string()).collect());
+    let mut parts = match split_args(&cmd) {
+        Ok(parts) => parts,
+        Err(e) => {
+            return json!({ "success": false, "message": format!("Cannot parse command: {}", e) });
+        }
+    };
     if parts.is_empty() {
         return json!({ "success": false, "message": "No command provided" });
     }
@@ -470,18 +641,78 @@ pub async fn run_terminal_command(
         args.push(part);
     }
 
-    let output = create_command(&exe_path).args(&args).output().await;
+    CONSOLE_CANCEL.store(false, Ordering::SeqCst);
 
-    match output {
-        Ok(o) => {
-            json!({
-                "success": o.status.success(),
-                "binary": binary_name,
-                "stdout": String::from_utf8_lossy(&o.stdout).to_string(),
-                "stderr": String::from_utf8_lossy(&o.stderr).to_string()
-            })
+    let mut child = match create_command(&exe_path)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return json!({ "success": false, "message": e.to_string() }),
+    };
+
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let _ = child.start_kill();
+        return json!({ "success": false, "message": "Failed to capture command output" });
+    };
+
+    let stdout_task = tokio::spawn(read_capped(stdout, MAX_CONSOLE_OUTPUT));
+    let stderr_task = tokio::spawn(read_capped(stderr, MAX_CONSOLE_OUTPUT));
+
+    let outcome = {
+        let wait = async {
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return ConsoleOutcome::Exited(status),
+                    Ok(None) => {}
+                    Err(e) => return ConsoleOutcome::Failed(e.to_string()),
+                }
+                if CONSOLE_CANCEL.load(Ordering::SeqCst) {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return ConsoleOutcome::Cancelled;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        match timeout(CONSOLE_TIMEOUT, wait).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                ConsoleOutcome::Cancelled
+            }
         }
-        Err(e) => json!({ "success": false, "message": e.to_string() }),
+    };
+
+    let stdout = timeout(Duration::from_secs(2), stdout_task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let stderr = timeout(Duration::from_secs(2), stderr_task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+
+    match outcome {
+        ConsoleOutcome::Exited(status) => json!({
+            "success": status.success(),
+            "binary": binary_name,
+            "stdout": stdout,
+            "stderr": stderr
+        }),
+        ConsoleOutcome::Cancelled => json!({
+            "success": false,
+            "binary": binary_name,
+            "stdout": stdout,
+            "stderr": stderr,
+            "message": "Command cancelled or timed out"
+        }),
+        ConsoleOutcome::Failed(e) => json!({ "success": false, "message": e }),
     }
 }
 
@@ -580,32 +811,42 @@ pub async fn kill_adb(
         "[SYSTEM] Terminating ADB stack...".to_string(),
     );
 
-    let mut child = create_command(&adb_path)
-        .arg("kill-server")
-        .spawn()
-        .map_err(|e| e.to_string())?;
-
-    let _ = child.wait().await;
-
-    // Force kill adb process via OS specifics
-    #[cfg(target_os = "windows")]
-    {
-        let _ = TokioCommand::new("taskkill")
-            .args(["/F", "/IM", "adb.exe", "/T"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .await;
+    if let Ok(mut child) = create_command(&adb_path).arg("kill-server").spawn() {
+        if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = TokioCommand::new("pkill").arg("adb").output().await;
-    }
+    // Force kill adb process via OS specifics. Taskkill is resolved from
+    // System32 so an attacker-controlled PATH cannot shadow it.
+    let force = tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "windows")]
+        {
+            StdCommand::new(system32_tool("taskkill.exe"))
+                .args(["/F", "/IM", "adb.exe", "/T"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            StdCommand::new("pkill")
+                .arg("-f")
+                .arg("adb")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        }
+    });
+    let _ = timeout(Duration::from_secs(5), force).await;
 
     sink.emit("scrcpy-log", "[SYSTEM] ADB Stack Terminated.".to_string());
     Ok(json!({ "success": true, "message": "ADB Stack Terminated" }))
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub async fn list_scrcpy_options(
     device: String,
     arg: String,
@@ -629,6 +870,7 @@ pub async fn list_scrcpy_options(
     }
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 fn detect_host_os() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
@@ -641,6 +883,7 @@ fn detect_host_os() -> &'static str {
     }
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 fn render_driver_label(driver: &str) -> &'static str {
     match driver {
         "direct3d" => "D3D11 (Direct3D)",
@@ -654,6 +897,7 @@ fn render_driver_label(driver: &str) -> &'static str {
     }
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 fn is_driver_allowed_on_os(driver: &str, host_os: &str) -> bool {
     match host_os {
         "windows" => driver != "metal",
@@ -663,6 +907,7 @@ fn is_driver_allowed_on_os(driver: &str, host_os: &str) -> bool {
     }
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 fn detect_render_drivers_from_help(help_output: &str) -> Vec<String> {
     let known = [
         "direct3d",
@@ -693,6 +938,7 @@ fn detect_render_drivers_from_help(help_output: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub async fn get_render_drivers(custom_path: Option<String>) -> serde_json::Value {
     let exe_path = get_binary_path("scrcpy", custom_path);
     let host_os = detect_host_os();
@@ -812,6 +1058,47 @@ pub struct ScrcpyConfig {
 }
 
 const HWDEC_VALUES: &[&str] = &["disabled", "vaapi", "d3d11va", "videotoolbox"];
+
+/// `--camera-id` takes a numeric id only (0, 1, ...). Anything else is a stale
+/// or hand-edited label and must not become an arbitrary flag value.
+fn parse_camera_id(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse().ok()
+}
+
+/// The three values scrcpy accepts for `--camera-facing`, compared
+/// case-insensitively.
+fn resolve_camera_facing(value: &str) -> Option<&'static str> {
+    let trimmed = value.trim();
+    ["back", "front", "external"]
+        .into_iter()
+        .find(|facing| trimmed.eq_ignore_ascii_case(facing))
+}
+
+/// Device names can contain `:`, spaces, path separators or arbitrary
+/// punctuation (mDNS serials). The recording filename is restricted to a
+/// conservative allowlist so it can never escape the chosen directory.
+fn sanitize_record_component(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "device".to_string()
+    } else {
+        cleaned
+    }
+}
 
 fn is_hwdec_allowed_on_os(value: &str) -> bool {
     match value {
@@ -1143,12 +1430,22 @@ fn recenter_window(pid: u32) {
 /// can be recovered without being able to see or focus it directly. A no-op
 /// if `device` has no tracked process (e.g. nothing is running).
 pub fn recenter_device(state: &ScrcpyState, device: &str) {
-    let pid = state
-        .processes
+    // Live children are owned by the generation registry now; keep the
+    // `ScrcpyState` map as a fallback for any child inserted by older wiring.
+    let pid = registry()
+        .sessions
         .lock()
         .unwrap()
         .get(device)
-        .and_then(|c| c.id());
+        .and_then(|session| session.pid)
+        .or_else(|| {
+            state
+                .processes
+                .lock()
+                .unwrap()
+                .get(device)
+                .and_then(|c| c.id())
+        });
     if let Some(pid) = pid {
         recenter_window(pid);
     }
@@ -1337,13 +1634,17 @@ fn build_scrcpy_args(
 
         if config.session_mode == "camera" {
             args.push("--video-source=camera".to_string());
-            if let Some(cid) = &config.camera_id {
-                if !cid.is_empty() {
-                    args.push(format!("--camera-id={}", cid));
-                } else if let Some(facing) = &config.camera_facing {
-                    args.push(format!("--camera-facing={}", facing));
-                }
-            } else if let Some(facing) = &config.camera_facing {
+            // Only a numeric camera id is a real id. Older configs stored the
+            // facing label ("back"/"front"/"external") in camera_id; those are
+            // ignored in favour of camera_facing instead of being pasted into
+            // the flag.
+            if let Some(id) = config.camera_id.as_deref().and_then(parse_camera_id) {
+                args.push(format!("--camera-id={}", id));
+            } else if let Some(facing) = config
+                .camera_facing
+                .as_deref()
+                .and_then(resolve_camera_facing)
+            {
                 args.push(format!("--camera-facing={}", facing));
             }
 
@@ -1437,7 +1738,7 @@ fn build_scrcpy_args(
 
                 let filename = format!(
                     "scrcpy_{}_{}.mkv",
-                    config.device.replace(":", "-"),
+                    sanitize_record_component(&config.device),
                     chrono::Local::now().format("%Y%m%d_%H%M%S")
                 );
                 let full_path = std::path::Path::new(&path).join(filename);
@@ -1462,6 +1763,57 @@ fn build_scrcpy_args(
     args
 }
 
+/// Incrementally reads one scrcpy pipe. Lines are decoded lossily: a single
+/// non-UTF-8 byte (device output, locale, emoji) must not stop the reader.
+async fn read_scrcpy_logs<R>(reader: R, sink: EventSink, audio_flag: Option<Arc<AtomicBool>>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    let mut batch: Vec<String> = Vec::new();
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            read = reader.read_until(b'\n', &mut buf) => {
+                match read {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&buf)
+                            .trim_end_matches(['\r', '\n'])
+                            .to_string();
+                        if let Some(flag) = &audio_flag {
+                            if is_audio_codec_error(&line) {
+                                flag.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        if !line.is_empty() {
+                            batch.push(line);
+                        }
+                        buf.clear();
+                        if batch.len() >= 50 {
+                            sink.emit("scrcpy-log", batch.join("\n"));
+                            batch.clear();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            _ = interval.tick() => {
+                if !batch.is_empty() {
+                    sink.emit("scrcpy-log", batch.join("\n"));
+                    batch.clear();
+                }
+            }
+        }
+    }
+    if !batch.is_empty() {
+        sink.emit("scrcpy-log", batch.join("\n"));
+    }
+}
+
 async fn spawn_scrcpy_streams(
     sink: &EventSink,
     exe_path: &str,
@@ -1469,7 +1821,7 @@ async fn spawn_scrcpy_streams(
     server_path: Option<&str>,
     args: &[String],
     vsync: bool,
-) -> Result<(tokio::process::Child, Arc<AtomicBool>), String> {
+) -> Result<(tokio::process::Child, Arc<AtomicBool>, Vec<JoinHandle<()>>), String> {
     let command_str = format!("> scrcpy {}", args.join(" "));
     sink.emit("scrcpy-log", command_str);
 
@@ -1492,93 +1844,290 @@ async fn spawn_scrcpy_streams(
 
     let mut child = command.spawn().map_err(|e| e.to_string())?;
 
-    let stdout = child.stdout.take().expect("Failed to capture stdout");
-    let stderr = child.stderr.take().expect("Failed to capture stderr");
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture scrcpy stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture scrcpy stderr".to_string())?;
 
     let audio_error_flag = Arc::new(AtomicBool::new(false));
+    let stdout_reader = tokio::spawn(read_scrcpy_logs(stdout, sink.clone(), None));
+    let stderr_reader = tokio::spawn(read_scrcpy_logs(
+        stderr,
+        sink.clone(),
+        Some(audio_error_flag.clone()),
+    ));
 
-    let sink_stdout = sink.clone();
-    tokio::spawn(async move {
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
-        let mut buffer = Vec::new();
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-
-        loop {
-            tokio::select! {
-                line_res = lines.next_line() => {
-                    match line_res {
-                        Ok(Some(line)) => buffer.push(line),
-                        Ok(None) => break,
-                        Err(_) => break,
-                    }
-                }
-                _ = interval.tick() => {
-                    if !buffer.is_empty() {
-                        let combined = buffer.join("\n");
-                        sink_stdout.emit("scrcpy-log", combined);
-                        buffer.clear();
-                    }
-                }
-            }
-        }
-        if !buffer.is_empty() {
-            sink_stdout.emit("scrcpy-log", buffer.join("\n"));
-        }
-    });
-
-    let sink_stderr = sink.clone();
-    let flag_clone = audio_error_flag.clone();
-    tokio::spawn(async move {
-        let reader = BufReader::new(stderr);
-        let mut lines = reader.lines();
-        let mut buffer = Vec::new();
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
-
-        loop {
-            tokio::select! {
-                line_res = lines.next_line() => {
-                    match line_res {
-                        Ok(Some(line)) => {
-                            if is_audio_codec_error(&line) {
-                                flag_clone.store(true, Ordering::SeqCst);
-                            }
-                            buffer.push(line);
-                        }
-                        Ok(None) => break,
-                        Err(_) => break,
-                    }
-                }
-                _ = interval.tick() => {
-                    if !buffer.is_empty() {
-                        let combined = buffer.join("\n");
-                        sink_stderr.emit("scrcpy-log", combined);
-                        buffer.clear();
-                    }
-                }
-            }
-        }
-        if !buffer.is_empty() {
-            sink_stderr.emit("scrcpy-log", buffer.join("\n"));
-        }
-    });
-
-    Ok((child, audio_error_flag))
+    Ok((child, audio_error_flag, vec![stdout_reader, stderr_reader]))
 }
 
-enum AttemptOutcome {
-    Exited(String),
-    WaitError(String),
-    UserStopped,
+/// Bounded wait for the log readers to reach EOF after the child exited.
+async fn join_readers(readers: Vec<JoinHandle<()>>) {
+    for handle in readers {
+        let _ = timeout(Duration::from_secs(2), handle).await;
+    }
 }
 
-pub async fn run_scrcpy(
-    sink: Arc<EventSink>,
-    state: Arc<ScrcpyState>,
+/// A running (or respawning) scrcpy session. `child` is `None` only while the
+/// audio-codec fallback sleeps; keeping the entry in the map during that gap
+/// means a stop can still cancel the retry instead of racing it.
+struct Session {
+    generation: u64,
+    pid: Option<u32>,
+    mirror_window: bool,
+    child: Option<tokio::process::Child>,
+    readers: Vec<JoinHandle<()>>,
+    cancel: Arc<AtomicBool>,
+    sink: EventSink,
+    requested_pos: Option<(i32, i32)>,
+    pos: Arc<Mutex<WindowPosTrack>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct WindowPosTrack {
+    first: Option<(i32, i32)>,
+    last: Option<(i32, i32)>,
+}
+
+/// Generation-scoped process registry. `commands.rs` is the only owner of live
+/// scrcpy children; `ScrcpyState::processes` is kept for the ported helper
+/// signatures but is no longer authoritative.
+#[derive(Default)]
+struct SessionRegistry {
+    counter: AtomicU64,
+    generations: Mutex<HashMap<String, u64>>,
+    sessions: Mutex<HashMap<String, Session>>,
+    shutdown: AtomicBool,
+}
+
+fn registry() -> &'static SessionRegistry {
+    static REGISTRY: OnceLock<SessionRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(SessionRegistry::default)
+}
+
+impl SessionRegistry {
+    fn bump_generation(&self, device: &str) -> u64 {
+        // Serialize with session insertion: a start must not be able to pass
+        // its generation check and then insert after a concurrent stop.
+        let _sessions = self.sessions.lock().unwrap();
+        let generation = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        self.generations
+            .lock()
+            .unwrap()
+            .insert(device.to_string(), generation);
+        generation
+    }
+
+    fn current_generation(&self, device: &str) -> Option<u64> {
+        self.generations.lock().unwrap().get(device).copied()
+    }
+
+    fn is_current(&self, device: &str, generation: u64) -> bool {
+        self.current_generation(device) == Some(generation)
+    }
+
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+}
+
+/// Increments and returns the current session generation for `device`.
+pub fn next_generation(device: &str) -> u64 {
+    registry().bump_generation(device)
+}
+
+/// Whether a scrcpy session currently owns `device` (including a fallback
+/// respawn gap). Replaces the UI's separate `running` table.
+pub fn is_running(device: &str) -> bool {
+    let registry = registry();
+    let sessions = registry.sessions.lock().unwrap();
+    match sessions.get(device) {
+        Some(session) => registry.current_generation(device) == Some(session.generation),
+        None => false,
+    }
+}
+
+/// True when `pid` belongs to a live scrcpy session managed here. The borderless
+/// drag hook uses this instead of the old (now empty) `ScrcpyState::processes`.
+pub fn is_our_pid(pid: u32) -> bool {
+    let sessions = registry().sessions.lock().unwrap();
+    sessions.values().any(|session| session.pid == Some(pid))
+}
+
+/// True when automatic audio fallback should retry. A normal exit (status 0)
+/// must never be retried just because stderr mentioned audio.
+fn should_audio_fallback(
+    auto_fallback: bool,
+    success: bool,
+    audio_failed: bool,
+    chain_index: usize,
+) -> bool {
+    auto_fallback && !success && audio_failed && chain_index < AUDIO_FALLBACK_CHAIN.len()
+}
+
+/// Windows: force-kill a process tree through the System32 `taskkill`.
+/// Returns `Err` when taskkill itself failed (the process may still be gone;
+/// callers confirm with `Child::wait`).
+async fn terminate_process_tree(pid: u32) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            let output = StdCommand::new(system32_tool("taskkill.exe"))
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .map_err(|e| format!("taskkill failed to start: {}", e))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "taskkill exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ))
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let output = StdCommand::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .output()
+                .map_err(|e| format!("kill failed to start: {}", e))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "kill exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("terminate task failed: {}", e))?
+}
+
+/// Synchronous kill used from `shutdown_all` (no runtime required).
+fn kill_process_tree_sync(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = StdCommand::new(system32_tool("taskkill.exe"))
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = StdCommand::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+async fn capture_window_pos(pid: u32) -> Option<(i32, i32)> {
+    #[cfg(target_os = "windows")]
+    {
+        try_capture_window_pos(pid)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        tokio::task::spawn_blocking(move || try_capture_window_pos(pid))
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
+fn emit_session_stopped(session: &Session, device: &str, fresh: Option<(i32, i32)>) {
+    let track = *session.pos.lock().unwrap();
+    let last = fresh.or(track.last);
+    emit_window_pos_and_stop(
+        &session.sink,
+        device,
+        session.requested_pos,
+        track.first,
+        last,
+    );
+}
+
+/// A monitor/stop may only publish the final `running:false` status while no
+/// newer session owns the device; otherwise a stop/start that happened while
+/// the old session was being reaped would overwrite the newer `running:true`.
+fn emit_session_stopped_if_owned(session: &Session, device: &str, fresh: Option<(i32, i32)>) {
+    let registry = registry();
+    {
+        let sessions = registry.sessions.lock().unwrap();
+        if registry.shutdown_requested() || sessions.contains_key(device) {
+            return;
+        }
+    }
+    emit_session_stopped(session, device, fresh);
+}
+
+/// Terminates a session that was replaced by a newer start. The old monitor
+/// sees its entry disappear and exits without emitting a second status.
+async fn terminate_previous_session(mut session: Session) {
+    session.cancel.store(true, Ordering::SeqCst);
+    if let Some(pid) = session.pid {
+        let _ = terminate_process_tree(pid).await;
+    }
+    if let Some(mut child) = session.child.take() {
+        if timeout(Duration::from_secs(3), child.wait()).await.is_err() {
+            let _ = child.start_kill();
+            let _ = timeout(Duration::from_secs(2), child.wait()).await;
+        }
+    }
+    join_readers(std::mem::take(&mut session.readers)).await;
+}
+
+/// Global shutdown for `on_quit`: drains and kills every child and makes any
+/// in-flight start refuse to insert a new process afterwards.
+pub fn shutdown_all() {
+    let registry = registry();
+    registry.shutdown.store(true, Ordering::SeqCst);
+    let sessions: Vec<(String, Session)> = {
+        let mut sessions = registry.sessions.lock().unwrap();
+        sessions.drain().collect()
+    };
+    for (device, mut session) in sessions {
+        registry.bump_generation(&device);
+        session.cancel.store(true, Ordering::SeqCst);
+        session.sink.emit(
+            "scrcpy-status",
+            json!({ "device": device, "running": false }),
+        );
+        if let Some(pid) = session.pid {
+            kill_process_tree_sync(pid);
+        }
+        if let Some(mut child) = session.child.take() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+pub async fn start_scrcpy(
+    device: String,
+    generation: u64,
     config: ScrcpyConfig,
+    sink: EventSink,
 ) -> Result<(), String> {
-    let video_dir = super::video_dir().map(|p| p.to_string_lossy().to_string());
+    let registry = registry();
+    // A stale generation (stopped, superseded, or quitting) must never spawn.
+    if registry.shutdown_requested() || !registry.is_current(&device, generation) {
+        return Ok(());
+    }
 
+    let video_dir = super::video_dir().map(|p| p.to_string_lossy().to_string());
     let exe_path = get_binary_path("scrcpy", config.scrcpy_path.clone());
 
     // Log the session details for the user
@@ -1645,7 +2194,20 @@ pub async fn run_scrcpy(
     // launches without --audio-codec, matching the previous default behaviour.
     let initial_args = build_scrcpy_args(&config, video_dir.clone(), None);
 
-    let (child, audio_error_flag) = spawn_scrcpy_streams(
+    // Any earlier session for this device is superseded (or a duplicate start
+    // raced us): terminate it before spawning. The registry insert below also
+    // refuses to overwrite an existing entry, so a live child can never be
+    // orphaned by the map.
+    let previous = registry.sessions.lock().unwrap().remove(&device);
+    if let Some(previous) = previous {
+        terminate_previous_session(previous).await;
+    }
+
+    if registry.shutdown_requested() || !registry.is_current(&device, generation) {
+        return Ok(());
+    }
+
+    let (child, audio_error_flag, readers) = match spawn_scrcpy_streams(
         &sink,
         &exe_path,
         &adb_exe_path,
@@ -1653,232 +2215,340 @@ pub async fn run_scrcpy(
         &initial_args,
         config.vsync.unwrap_or(true),
     )
-    .await?;
+    .await
+    {
+        Ok(spawned) => spawned,
+        Err(e) => {
+            sink.emit(
+                "scrcpy-status",
+                json!({ "device": device, "running": false }),
+            );
+            return Err(e);
+        }
+    };
 
-    let initial_scrcpy_pid = child.id();
-    state
-        .processes
-        .lock()
-        .unwrap()
-        .insert(config.device.clone(), child);
-    sink.emit(
-        "scrcpy-status",
-        json!({ "device": config.device, "running": true }),
-    );
-
-    // Monitor for exit (and orchestrate the audio codec fallback chain)
-    let device_mon = config.device.clone();
-    let sink_mon = sink.clone();
-    let state_mon = state.clone();
-    let video_dir_mon = video_dir;
-    let exe_path_mon = exe_path;
-    let adb_exe_path_mon = adb_exe_path;
-    let server_path_mon = server_path;
-    let config_mon = config.clone();
-
-    // Position we asked scrcpy to open at this launch (if any). Used to learn
-    // the decoration offset so the saved position round-trips exactly. See
-    // resolve_window_pos_to_persist.
-    let requested_pos: Option<(i32, i32)> = match (config_mon.window_x, config_mon.window_y) {
+    // Check the generation again after the spawn: a stop that arrived while
+    // the process was starting must win over this session.
+    let pid = child.id();
+    let requested_pos = match (config.window_x, config.window_y) {
         (Some(x), Some(y)) => Some((x, y)),
         _ => None,
     };
     // Only track and persist the position for windowed mirror sessions. A
-    // fullscreen session has no meaningful position (it would report the
-    // monitor origin, e.g. 0,0), and camera/desktop sessions must not overwrite
-    // the mirror window's remembered position.
-    let track_pos = config_mon.session_mode == "mirror" && !config_mon.fullscreen.unwrap_or(false);
+    // fullscreen session has no meaningful position, and camera/desktop
+    // sessions must not overwrite the mirror window's remembered position.
+    let mirror_window = config.session_mode == "mirror" && !config.fullscreen.unwrap_or(false);
+    let pos = Arc::new(Mutex::new(WindowPosTrack::default()));
 
-    tokio::spawn(async move {
-        let mut current_audio_flag = audio_error_flag;
-        let mut chain_index: usize = 0;
-        let mut current_scrcpy_pid = initial_scrcpy_pid;
-        let mut first_window_pos: Option<(i32, i32)> = None;
-        let mut last_window_pos: Option<(i32, i32)> = None;
-
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            // Sample the live window position on every tick. This is the only
-            // path that can catch a move made right before the user closes the
-            // mirror window itself (rather than through stop_scrcpy, which
-            // grabs its own guaranteed-fresh sample): SDL destroys the window
-            // before the process exits, so by the time that exit is detected
-            // below the position is unreadable, and this periodic sample is
-            // all that is left to persist. Sampling every tick instead of
-            // every few seconds keeps that worst case down to ~500ms stale
-            // instead of several seconds.
-            if track_pos {
-                if let Some(pid) = current_scrcpy_pid {
-                    if let Some(pos) = try_capture_window_pos(pid) {
-                        if first_window_pos.is_none() {
-                            first_window_pos = Some(pos);
-                        }
-                        last_window_pos = Some(pos);
-                    }
-                }
-            }
-
-            let outcome = {
-                let mut processes = state_mon.processes.lock().unwrap();
-                match processes.get_mut(&device_mon) {
-                    Some(child) => match child.try_wait() {
-                        Ok(Some(status)) => {
-                            processes.remove(&device_mon);
-                            Some(AttemptOutcome::Exited(status.to_string()))
-                        }
-                        Ok(None) => None,
-                        Err(e) => {
-                            processes.remove(&device_mon);
-                            Some(AttemptOutcome::WaitError(e.to_string()))
-                        }
-                    },
-                    None => Some(AttemptOutcome::UserStopped),
-                }
-            };
-
-            let outcome = match outcome {
-                Some(o) => o,
-                None => continue,
-            };
-
-            match outcome {
-                AttemptOutcome::WaitError(e) => {
-                    sink_mon.emit(
-                        "scrcpy-log",
-                        format!("[SYSTEM] Error waiting for scrcpy: {}", e),
-                    );
-                    emit_window_pos_and_stop(
-                        &sink_mon,
-                        &device_mon,
-                        requested_pos,
-                        first_window_pos,
-                        last_window_pos,
-                    );
-                    break;
-                }
-                AttemptOutcome::UserStopped => {
-                    // stop_scrcpy grabs one last, guaranteed-fresh sample right
-                    // before killing the process -- prefer it over our own
-                    // periodic sample, which can be up to ~3s stale if the
-                    // window was moved and closed in the same breath.
-                    let fresh_pos = state_mon
-                        .final_capture_hint
-                        .lock()
-                        .unwrap()
-                        .remove(&device_mon);
-                    let pos_to_persist = fresh_pos.or(last_window_pos);
-                    emit_window_pos_and_stop(
-                        &sink_mon,
-                        &device_mon,
-                        requested_pos,
-                        first_window_pos,
-                        pos_to_persist,
-                    );
-                    break;
-                }
-                AttemptOutcome::Exited(status) => {
-                    sink_mon.emit(
-                        "scrcpy-log",
-                        format!("[SYSTEM] Scrcpy process exited with status: {}", status),
-                    );
-
-                    // Give stream reader tasks a moment to flush remaining stderr
-                    // lines (the audio error pattern may still be in flight).
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-
-                    let audio_failed = current_audio_flag.load(Ordering::SeqCst);
-
-                    if should_auto_fallback
-                        && audio_failed
-                        && chain_index < AUDIO_FALLBACK_CHAIN.len()
-                    {
-                        let next_codec = AUDIO_FALLBACK_CHAIN[chain_index];
-                        sink_mon.emit(
-                            "scrcpy-log",
-                            format!(
-                                "[SYSTEM] Default audio codec failed, retrying with {}...",
-                                next_codec.to_uppercase()
-                            ),
-                        );
-
-                        let new_args =
-                            build_scrcpy_args(&config_mon, video_dir_mon.clone(), Some(next_codec));
-
-                        match spawn_scrcpy_streams(
-                            &sink_mon,
-                            &exe_path_mon,
-                            &adb_exe_path_mon,
-                            server_path_mon.as_deref(),
-                            &new_args,
-                            config_mon.vsync.unwrap_or(true),
-                        )
-                        .await
-                        {
-                            Ok((new_child, new_flag)) => {
-                                current_scrcpy_pid = new_child.id();
-                                // New window: re-learn its decoration offset by
-                                // resampling this attempt from scratch. Clear the
-                                // last sample too, so we never persist the old
-                                // window's position with the new (unlearned)
-                                // offset if this attempt closes before its first
-                                // sample.
-                                first_window_pos = None;
-                                last_window_pos = None;
-
-                                state_mon
-                                    .processes
-                                    .lock()
-                                    .unwrap()
-                                    .insert(device_mon.clone(), new_child);
-                                current_audio_flag = new_flag;
-                                chain_index += 1;
-                                continue;
-                            }
-                            Err(e) => {
-                                sink_mon.emit(
-                                    "scrcpy-log",
-                                    format!("[SYSTEM] Failed to spawn retry: {}", e),
-                                );
-                                emit_window_pos_and_stop(
-                                    &sink_mon,
-                                    &device_mon,
-                                    requested_pos,
-                                    first_window_pos,
-                                    last_window_pos,
-                                );
-                                break;
-                            }
-                        }
-                    } else if should_auto_fallback && audio_failed {
-                        sink_mon.emit(
-                            "scrcpy-log",
-                            "[SYSTEM] No compatible audio codec found. Consider disabling audio forwarding.".to_string(),
-                        );
-                        emit_window_pos_and_stop(
-                            &sink_mon,
-                            &device_mon,
-                            requested_pos,
-                            first_window_pos,
-                            last_window_pos,
-                        );
-                        break;
-                    } else {
-                        emit_window_pos_and_stop(
-                            &sink_mon,
-                            &device_mon,
-                            requested_pos,
-                            first_window_pos,
-                            last_window_pos,
-                        );
-                        break;
-                    }
-                }
-            }
+    let mut child_opt = Some(child);
+    let mut readers_opt = Some(readers);
+    let inserted = {
+        let mut sessions = registry.sessions.lock().unwrap();
+        if registry.shutdown_requested()
+            || !registry.is_current(&device, generation)
+            || sessions.contains_key(&device)
+        {
+            false
+        } else {
+            sessions.insert(
+                device.clone(),
+                Session {
+                    generation,
+                    pid,
+                    mirror_window,
+                    child: child_opt.take(),
+                    readers: readers_opt.take().unwrap_or_default(),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    sink: sink.clone(),
+                    requested_pos,
+                    pos: pos.clone(),
+                },
+            );
+            true
         }
-    });
+    };
+
+    if !inserted {
+        // Quit/stop/supersede won the race; leave no freshly spawned orphan.
+        if let Some(mut child) = child_opt.take() {
+            let _ = child.start_kill();
+            let _ = timeout(Duration::from_secs(2), child.wait()).await;
+        }
+        join_readers(readers_opt.take().unwrap_or_default()).await;
+        return Ok(());
+    }
+
+    sink.emit(
+        "scrcpy-status",
+        json!({ "device": device, "running": true }),
+    );
+
+    tokio::spawn(monitor_session(
+        device,
+        generation,
+        sink,
+        config,
+        exe_path,
+        adb_exe_path,
+        server_path,
+        video_dir,
+        should_auto_fallback,
+        audio_error_flag,
+        0,
+    ));
 
     Ok(())
+}
+
+/// Removes a fallback placeholder only if it is still ours. Returns the
+/// removed session so the caller can emit the final stopped status.
+fn take_placeholder(device: &str, generation: u64) -> Option<Session> {
+    let registry = registry();
+    let mut sessions = registry.sessions.lock().unwrap();
+    let placeholder = sessions
+        .get(device)
+        .is_some_and(|slot| slot.generation == generation && slot.child.is_none());
+    if placeholder {
+        sessions.remove(device)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn monitor_session(
+    device: String,
+    generation: u64,
+    sink: EventSink,
+    config: ScrcpyConfig,
+    exe_path: String,
+    adb_exe_path: String,
+    server_path: Option<String>,
+    video_dir: Option<String>,
+    should_auto_fallback: bool,
+    mut audio_flag: Arc<AtomicBool>,
+    mut chain_index: usize,
+) {
+    let registry = registry();
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Sample the live window position on every tick: SDL destroys the
+        // window before the process exits, so a periodic sample is the only
+        // way to catch a move made just before the user closes the window.
+        let sample = {
+            let sessions = registry.sessions.lock().unwrap();
+            match sessions.get(&device) {
+                Some(session) if session.generation == generation => {
+                    if session.mirror_window {
+                        session.pid.map(|pid| (pid, session.pos.clone()))
+                    } else {
+                        None
+                    }
+                }
+                _ => return,
+            }
+        };
+        if let Some((pid, pos)) = sample {
+            if let Some(found) = capture_window_pos(pid).await {
+                let mut track = pos.lock().unwrap();
+                if track.first.is_none() {
+                    track.first = Some(found);
+                }
+                track.last = Some(found);
+            }
+        }
+
+        let exit = {
+            let mut sessions = registry.sessions.lock().unwrap();
+            let Some(session) = sessions.get_mut(&device) else {
+                return;
+            };
+            if session.generation != generation {
+                return;
+            }
+            match session.child.as_mut() {
+                Some(child) => match child.try_wait() {
+                    Ok(Some(status)) => Some(Ok(status)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e.to_string())),
+                },
+                // stop_scrcpy detached the child and owns the final status.
+                None => return,
+            }
+        };
+        let Some(exit) = exit else { continue };
+
+        // Claim the entry before touching anything else: only one monitor can
+        // finalise a generation, and a stop that already removed it wins.
+        let Some(mut session) = ({
+            let mut sessions = registry.sessions.lock().unwrap();
+            let ours = sessions
+                .get(&device)
+                .is_some_and(|session| session.generation == generation);
+            if ours { sessions.remove(&device) } else { None }
+        }) else {
+            return;
+        };
+
+        join_readers(std::mem::take(&mut session.readers)).await;
+
+        let status = match exit {
+            Ok(status) => status,
+            Err(e) => {
+                sink.emit(
+                    "scrcpy-log",
+                    format!("[SYSTEM] Error waiting for scrcpy: {}", e),
+                );
+                emit_session_stopped_if_owned(&session, &device, None);
+                return;
+            }
+        };
+
+        let success = status.success();
+        sink.emit(
+            "scrcpy-log",
+            format!("[SYSTEM] Scrcpy process exited with status: {}", status),
+        );
+
+        let audio_failed = audio_flag.load(Ordering::SeqCst);
+
+        if should_audio_fallback(should_auto_fallback, success, audio_failed, chain_index) {
+            let next_codec = AUDIO_FALLBACK_CHAIN[chain_index];
+            sink.emit(
+                "scrcpy-log",
+                format!(
+                    "[SYSTEM] Default audio codec failed, retrying with {}...",
+                    next_codec.to_uppercase()
+                ),
+            );
+
+            // Keep a placeholder in the registry during the 250 ms flush window:
+            // a stop arriving now can still invalidate the retry.
+            let placed = {
+                let mut sessions = registry.sessions.lock().unwrap();
+                if !registry.shutdown_requested()
+                    && registry.is_current(&device, generation)
+                    && !sessions.contains_key(&device)
+                {
+                    sessions.insert(
+                        device.clone(),
+                        Session {
+                            generation,
+                            pid: None,
+                            mirror_window: session.mirror_window,
+                            child: None,
+                            readers: Vec::new(),
+                            cancel: session.cancel.clone(),
+                            sink: sink.clone(),
+                            requested_pos: session.requested_pos,
+                            pos: Arc::new(Mutex::new(WindowPosTrack::default())),
+                        },
+                    );
+                    true
+                } else {
+                    false
+                }
+            };
+            if !placed {
+                // A stop or a newer start claimed the slot; it owns the status.
+                emit_session_stopped_if_owned(&session, &device, None);
+                return;
+            }
+
+            tokio::time::sleep(AUDIO_FALLBACK_DELAY).await;
+
+            let allowed = {
+                let sessions = registry.sessions.lock().unwrap();
+                !registry.shutdown_requested()
+                    && registry.is_current(&device, generation)
+                    && sessions.get(&device).is_some_and(|slot| {
+                        slot.generation == generation
+                            && slot.child.is_none()
+                            && !slot.cancel.load(Ordering::SeqCst)
+                    })
+            };
+            if !allowed {
+                if let Some(removed) = take_placeholder(&device, generation) {
+                    emit_session_stopped(&removed, &device, None);
+                }
+                return;
+            }
+
+            let new_args = build_scrcpy_args(&config, video_dir.clone(), Some(next_codec));
+            match spawn_scrcpy_streams(
+                &sink,
+                &exe_path,
+                &adb_exe_path,
+                server_path.as_deref(),
+                &new_args,
+                config.vsync.unwrap_or(true),
+            )
+            .await
+            {
+                Ok((new_child, new_flag, new_readers)) => {
+                    let new_pid = new_child.id();
+                    let mut child_opt = Some(new_child);
+                    let mut readers_opt = Some(new_readers);
+                    let installed = {
+                        let mut sessions = registry.sessions.lock().unwrap();
+                        if registry.shutdown_requested()
+                            || !registry.is_current(&device, generation)
+                        {
+                            false
+                        } else if let Some(slot) = sessions.get_mut(&device) {
+                            if slot.generation == generation && slot.child.is_none() {
+                                slot.child = child_opt.take();
+                                slot.pid = new_pid;
+                                slot.readers = readers_opt.take().unwrap_or_default();
+                                slot.pos = Arc::new(Mutex::new(WindowPosTrack::default()));
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+                    if !installed {
+                        if let Some(removed) = take_placeholder(&device, generation) {
+                            emit_session_stopped_if_owned(&removed, &device, None);
+                        }
+                        if let Some(mut child) = child_opt.take() {
+                            let _ = child.start_kill();
+                            let _ = timeout(Duration::from_secs(2), child.wait()).await;
+                        }
+                        join_readers(readers_opt.take().unwrap_or_default()).await;
+                        return;
+                    }
+                    audio_flag = new_flag;
+                    chain_index += 1;
+                    continue;
+                }
+                Err(e) => {
+                    sink.emit(
+                        "scrcpy-log",
+                        format!("[SYSTEM] Failed to spawn retry: {}", e),
+                    );
+                    if let Some(removed) = take_placeholder(&device, generation) {
+                        emit_session_stopped_if_owned(&removed, &device, None);
+                    }
+                    return;
+                }
+            }
+        } else {
+            if should_auto_fallback && audio_failed {
+                sink.emit(
+                    "scrcpy-log",
+                    "[SYSTEM] No compatible audio codec found. Consider disabling audio forwarding."
+                        .to_string(),
+                );
+            }
+            emit_session_stopped_if_owned(&session, &device, None);
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2317,50 +2987,389 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
             ]
         );
     }
+
+    #[test]
+    fn test_parse_camera_id_accepts_digits_only() {
+        assert_eq!(parse_camera_id("0"), Some(0));
+        assert_eq!(parse_camera_id(" 12 "), Some(12));
+        assert_eq!(parse_camera_id("back"), None);
+        assert_eq!(parse_camera_id("1 --no-audio"), None);
+        assert_eq!(parse_camera_id("-1"), None);
+        assert_eq!(parse_camera_id(""), None);
+    }
+
+    #[test]
+    fn test_camera_id_numeric_wins_over_facing() {
+        let mut config = base_config("camera");
+        config.camera_id = Some("2".to_string());
+        config.camera_facing = Some("front".to_string());
+
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--camera-id=2".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("--camera-facing")));
+    }
+
+    #[test]
+    fn test_camera_id_label_falls_back_to_facing() {
+        // Old configs wrote "back"/"front"/"external" into camera_id.
+        let mut config = base_config("camera");
+        config.camera_id = Some("back".to_string());
+        config.camera_facing = Some("front".to_string());
+
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--camera-id")));
+        assert!(args.contains(&"--camera-facing=front".to_string()));
+    }
+
+    #[test]
+    fn test_camera_id_flag_injection_is_ignored() {
+        let mut config = base_config("camera");
+        config.camera_id = Some("1 --no-audio".to_string());
+
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--camera-id")));
+        assert!(!args.contains(&"--no-audio".to_string()));
+    }
+
+    #[test]
+    fn test_camera_facing_allowlist() {
+        assert_eq!(resolve_camera_facing(" FRONT "), Some("front"));
+        assert_eq!(resolve_camera_facing("external"), Some("external"));
+        assert_eq!(resolve_camera_facing("--no-audio"), None);
+
+        let mut config = base_config("camera");
+        config.camera_facing = Some("--no-audio".to_string());
+
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--camera-facing")));
+    }
+
+    #[test]
+    fn test_sanitize_record_component_whitelist() {
+        assert_eq!(sanitize_record_component("a/b\\c d"), "a_b_c_d");
+        assert_eq!(
+            sanitize_record_component("192.168.1.5:5555"),
+            "192.168.1.5_5555"
+        );
+        assert_eq!(sanitize_record_component("../../evil"), ".._.._evil");
+        assert_eq!(sanitize_record_component("é"), "_");
+        assert_eq!(sanitize_record_component(""), "device");
+        assert!(sanitize_record_component(&"x".repeat(100)).len() <= 64);
+    }
+
+    #[test]
+    fn test_record_filename_uses_sanitized_device() {
+        let mut config = base_config("mirror");
+        config.device = "192.168.1.5:5555".to_string();
+        config.record = Some(true);
+        config.record_path = Some(std::env::temp_dir().to_string_lossy().to_string());
+
+        let args = build_scrcpy_args(&config, None, None);
+        let record = args
+            .iter()
+            .find(|arg| arg.starts_with("--record="))
+            .expect("record flag");
+        let filename = std::path::Path::new(record.trim_start_matches("--record="))
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        assert!(filename.starts_with("scrcpy_192.168.1.5_5555_"));
+        assert!(filename.ends_with(".mkv"));
+        assert!(
+            filename
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        );
+    }
+
+    #[test]
+    fn test_split_args_rejects_unclosed_quote() {
+        assert!(split_args("adb shell \"unterminated").is_err());
+        assert_eq!(
+            split_args("shell \"hello world\"").unwrap(),
+            vec!["shell".to_string(), "hello world".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_capped_keeps_limit_and_drains() {
+        let input = vec![b'a'; 4096];
+        let text = read_capped(&input[..], 1024).await;
+        assert!(text.starts_with("aaaa"));
+        assert!(text.contains("[output truncated]"));
+        assert!(text.len() < 2048);
+    }
+
+    #[test]
+    fn test_progress_throttle() {
+        assert!(should_emit_progress(None, 1, Duration::ZERO));
+        assert!(!should_emit_progress(
+            Some(1),
+            1,
+            Duration::from_millis(500)
+        ));
+        assert!(!should_emit_progress(Some(1), 2, Duration::from_millis(10)));
+        assert!(should_emit_progress(Some(1), 2, Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn test_download_progress_event_contract() {
+        let (event, payload) = download_progress_event(42);
+        assert_eq!(event, "scrcpy-status");
+        assert_eq!(payload["type"], "download-progress");
+        assert_eq!(payload["percent"], 42);
+    }
+
+    #[test]
+    fn test_audio_fallback_requires_failed_exit() {
+        assert!(should_audio_fallback(true, false, true, 0));
+        // A normal window close (status 0) is not retried even if stderr
+        // happened to contain an audio error pattern.
+        assert!(!should_audio_fallback(true, true, true, 0));
+        assert!(!should_audio_fallback(false, false, true, 0));
+        assert!(!should_audio_fallback(true, false, false, 0));
+        assert!(!should_audio_fallback(
+            true,
+            false,
+            true,
+            AUDIO_FALLBACK_CHAIN.len()
+        ));
+    }
+
+    #[test]
+    fn test_sha256_of_reader_matches_known_digest() {
+        assert_eq!(
+            sha256_of_reader(&b"abc"[..]).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_verify_downloaded_file_checks_length_and_hash() {
+        let workspace = TempWorkspace::create(&std::env::temp_dir()).unwrap();
+        let path = workspace.root.join("archive.bin");
+        std::fs::write(&path, b"abc").unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(verify_downloaded_file(file, 4).is_err());
+
+        let file = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            verify_downloaded_file(file, 3).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_temp_workspace_is_unique_and_cleaned_up() {
+        let base = std::env::temp_dir();
+        let first = TempWorkspace::create(&base).unwrap();
+        let second = TempWorkspace::create(&base).unwrap();
+        assert_ne!(first.root, second.root);
+        assert!(first.root.exists());
+
+        let first_root = first.root.clone();
+        drop(first);
+        assert!(!first_root.exists());
+    }
+
+    #[test]
+    fn test_cwd_binary_fallback_is_debug_only() {
+        assert_eq!(include_cwd_scrcpy_bin(), cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn test_binary_filename_has_platform_extension() {
+        let name = binary_filename("scrcpy");
+        assert!(name.starts_with("scrcpy"));
+        #[cfg(target_os = "windows")]
+        assert_eq!(name, "scrcpy.exe");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_system32_tool_is_absolute() {
+        let tool = system32_tool("taskkill.exe");
+        assert!(tool.is_absolute());
+        assert_eq!(tool.file_name().unwrap().to_string_lossy(), "taskkill.exe");
+        assert_eq!(
+            tool.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_ascii_lowercase(),
+            "system32"
+        );
+    }
+
+    #[test]
+    fn test_friendly_name_from_getprop() {
+        assert_eq!(
+            friendly_name_from_getprop("ZY22MGW35T", "Galaxy S23\nsamsung\nSM-S911B\n"),
+            Some("Galaxy S23".to_string())
+        );
+        assert_eq!(
+            friendly_name_from_getprop("ZY22MGW35T", "\nGoogle\nPixel 7\n"),
+            Some("Google Pixel 7".to_string())
+        );
+        assert_eq!(
+            friendly_name_from_getprop("ZY22MGW35T", "\nsamsung\nSamsung SM-S911B\n"),
+            Some("Samsung SM-S911B".to_string())
+        );
+        assert_eq!(
+            friendly_name_from_getprop("emulator-5554", "Pixel_7_API_34\n"),
+            Some("Pixel 7 API 34 (emulator-5554)".to_string())
+        );
+        assert_eq!(friendly_name_from_getprop("ZY22MGW35T", "\n\n"), None);
+    }
+
+    #[test]
+    fn test_is_emulator_serial() {
+        assert!(is_emulator_serial("emulator-5554"));
+        assert!(!is_emulator_serial("emulator-"));
+        assert!(!is_emulator_serial("emulator-abc"));
+        assert!(!is_emulator_serial("ZY22MGW35T"));
+    }
+
+    #[test]
+    fn test_generation_and_is_running_registry() {
+        let device = "unit-test-generation-device";
+        let first = next_generation(device);
+        let second = next_generation(device);
+        assert!(second > first);
+        assert!(!is_running(device));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = EventSink::new(tx);
+        {
+            let mut sessions = registry().sessions.lock().unwrap();
+            sessions.insert(
+                device.to_string(),
+                Session {
+                    generation: second,
+                    pid: None,
+                    mirror_window: false,
+                    child: None,
+                    readers: Vec::new(),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    sink,
+                    requested_pos: None,
+                    pos: Arc::new(Mutex::new(WindowPosTrack::default())),
+                },
+            );
+        }
+        assert!(is_running(device));
+
+        registry().sessions.lock().unwrap().remove(device);
+        assert!(!is_running(device));
+    }
+
+    #[tokio::test]
+    async fn test_stop_scrcpy_cancels_placeholder_and_emits_stopped() {
+        let device = "unit-test-stop-placeholder";
+        let generation = next_generation(device);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = EventSink::new(tx);
+        {
+            let mut sessions = registry().sessions.lock().unwrap();
+            sessions.insert(
+                device.to_string(),
+                Session {
+                    generation,
+                    pid: None,
+                    mirror_window: false,
+                    child: None,
+                    readers: Vec::new(),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    sink,
+                    requested_pos: None,
+                    pos: Arc::new(Mutex::new(WindowPosTrack::default())),
+                },
+            );
+        }
+        assert!(is_running(device));
+
+        stop_scrcpy(device).await.unwrap();
+        assert!(!is_running(device));
+
+        let mut saw_stopped = false;
+        while let Ok(event) = rx.try_recv() {
+            if event.name == "scrcpy-status"
+                && event.payload.get("device").and_then(|v| v.as_str()) == Some(device)
+                && event.payload.get("running").and_then(|v| v.as_bool()) == Some(false)
+            {
+                saw_stopped = true;
+            }
+        }
+        assert!(saw_stopped);
+    }
 }
 
-pub async fn stop_scrcpy(state: Arc<ScrcpyState>, device: String) -> Result<(), String> {
-    let child = {
-        let mut processes = state.processes.lock().unwrap();
-        processes.remove(&device)
+pub async fn stop_scrcpy(device: &str) -> Result<(), String> {
+    let registry = registry();
+    // Invalidate the generation first: an in-flight start/monitor must not be
+    // able to resurrect this session after the stop.
+    registry.bump_generation(device);
+
+    // Sample the mirror window while the process is still alive, before the
+    // registry entry (and its pid) is removed. Camera/desktop sessions have no
+    // remembered mirror position, so they are skipped.
+    let snapshot = {
+        let sessions = registry.sessions.lock().unwrap();
+        sessions
+            .get(device)
+            .map(|session| (session.pid, session.mirror_window))
+    };
+    let fresh_pos = match snapshot {
+        Some((Some(pid), true)) => capture_window_pos(pid).await,
+        _ => None,
     };
 
-    if let Some(mut c) = child {
-        if let Some(pid) = c.id() {
-            // Grab the window's position now, one last time, before it's
-            // killed: this is the only moment it's guaranteed to still be
-            // exactly where the user left it. The run_scrcpy monitor loop
-            // only refreshes its own sample every ~3s, so stopping right
-            // after a move could otherwise persist a stale, pre-move spot.
-            if let Some(pos) = try_capture_window_pos(pid) {
-                state
-                    .final_capture_hint
-                    .lock()
-                    .unwrap()
-                    .insert(device.clone(), pos);
-            }
+    let Some(mut session) = registry.sessions.lock().unwrap().remove(device) else {
+        return Ok(());
+    };
+    session.cancel.store(true, Ordering::SeqCst);
 
-            #[cfg(target_os = "windows")]
-            {
-                let _ = StdCommand::new("taskkill")
-                    .args(["/PID", &pid.to_string()])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
-            }
+    let kill_result = match session.pid {
+        Some(pid) => Some(terminate_process_tree(pid).await),
+        None => None,
+    };
 
-            #[cfg(not(target_os = "windows"))]
-            {
-                // Try graceful termination first via SIGTERM
-                let _ = StdCommand::new("kill").arg(pid.to_string()).output();
+    // Wait for and verify the exit. taskkill /F /T should be immediate; a
+    // process that ignores it falls back to Child::start_kill.
+    let wait_result: Result<(), String> = if let Some(mut child) = session.child.take() {
+        match timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("Failed to wait for scrcpy: {}", e)),
+            Err(_) => {
+                let _ = child.start_kill();
+                match timeout(Duration::from_secs(2), child.wait()).await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(format!("Failed to kill scrcpy: {}", e)),
+                    Err(_) => Err("scrcpy did not exit after taskkill".to_string()),
+                }
             }
-
-            // Give it a moment to finalize, but don't block too long
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        } else {
-            let _ = c.kill().await;
         }
+    } else {
+        Ok(())
+    };
+
+    join_readers(std::mem::take(&mut session.readers)).await;
+    emit_session_stopped_if_owned(&session, device, fresh_pos);
+
+    match (kill_result, wait_result) {
+        (_, Err(e)) => Err(e),
+        (Some(Err(e)), Ok(())) => {
+            // taskkill may say "not found" for a process that exited on its own
+            // between sampling and killing; Child::wait already confirmed exit.
+            session.sink.emit("scrcpy-log", format!("[SYSTEM] {}", e));
+            Ok(())
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Windows asset suffix published by the scrcpy release workflow.
@@ -2389,10 +3398,174 @@ fn parse_sha256_manifest(manifest: &str, filename: &str) -> Option<String> {
     None
 }
 
-pub async fn download_scrcpy(sink: Arc<EventSink>) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Write;
+fn unique_suffix() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        nanos,
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
+/// Scratch directory for one download. The unique name means two instances (or
+/// a retry) never share `scrcpy_temp.zip` / `temp_extract`; Drop removes it on
+/// every exit path, including errors.
+struct TempWorkspace {
+    root: PathBuf,
+}
+
+impl TempWorkspace {
+    fn create(base: &Path) -> Result<Self, String> {
+        for _ in 0..16 {
+            let root = base.join(format!(".scrcpy-download-{}", unique_suffix()));
+            match std::fs::create_dir(&root) {
+                Ok(()) => return Ok(Self { root }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(format!("Failed to create temporary download folder: {}", e));
+                }
+            }
+        }
+        Err("Failed to create a unique temporary download folder".to_string())
+    }
+}
+
+impl Drop for TempWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn sha256_of_reader<R: std::io::Read>(mut reader: R) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read downloaded archive: {}", e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verifies the file through the same handle that was written (rewound), not a
+/// detached in-memory buffer or a re-opened path.
+fn verify_downloaded_file(mut file: std::fs::File, expected_len: u64) -> Result<String, String> {
+    use std::io::{Seek, SeekFrom};
+
+    let actual_len = file
+        .metadata()
+        .map_err(|e| format!("Failed to stat downloaded archive: {}", e))?
+        .len();
+    if actual_len != expected_len {
+        return Err(format!(
+            "Downloaded archive length mismatch: expected {} bytes, got {}",
+            expected_len, actual_len
+        ));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("Failed to rewind downloaded archive: {}", e))?;
+    sha256_of_reader(file)
+}
+
+/// At most one progress event per whole percent and per 100 ms.
+fn should_emit_progress(last_percent: Option<u64>, percent: u64, elapsed: Duration) -> bool {
+    match last_percent {
+        None => true,
+        Some(last) => percent >= last.saturating_add(1) && elapsed >= Duration::from_millis(100),
+    }
+}
+
+/// Download progress travels as the top-level `scrcpy-status` event with a
+/// `download-progress` type, matching `Ui::handle_status`.
+fn download_progress_event(percent: u64) -> (&'static str, serde_json::Value) {
+    (
+        "scrcpy-status",
+        json!({ "type": "download-progress", "percent": percent }),
+    )
+}
+
+fn extract_archive(archive: &Path, dest: &Path, extension: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dest)
+        .map_err(|e| format!("Failed to create extraction directory: {}", e))?;
+
+    if extension == ".zip" {
+        let file =
+            std::fs::File::open(archive).map_err(|e| format!("Failed to open zip: {}", e))?;
+        let mut zip =
+            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
+        zip.extract(dest)
+            .map_err(|e| format!("Failed to extract: {}", e))?;
+    } else {
+        let file =
+            std::fs::File::open(archive).map_err(|e| format!("Failed to open tar.gz: {}", e))?;
+        let tar = GzDecoder::new(file);
+        let mut archive = Archive::new(tar);
+        archive
+            .unpack(dest)
+            .map_err(|e| format!("Failed to extract tar: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Moves the extracted tree into `<exe dir>/scrcpy-bin`. The current install is
+/// renamed aside first and restored if the swap fails, so a failed update
+/// leaves the working installation untouched.
+fn install_extracted(staging: &Path, extract_path: &Path) -> Result<(), String> {
+    let mut entries =
+        std::fs::read_dir(staging).map_err(|e| format!("Failed to read archive: {}", e))?;
+    let first = entries
+        .next()
+        .transpose()
+        .map_err(|e| format!("Failed to read archive entry: {}", e))?;
+    let has_more = entries.next().is_some();
+    let source = match (first, has_more) {
+        (Some(entry), false) if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) => {
+            entry.path()
+        }
+        _ => staging.to_path_buf(),
+    };
+
+    let expected = binary_filename("scrcpy");
+    if !source.join(&expected).is_file() {
+        return Err(format!("Downloaded archive does not contain {}", expected));
+    }
+
+    let parent = extract_path
+        .parent()
+        .ok_or_else(|| "Invalid scrcpy installation path".to_string())?;
+    let backup = parent.join(format!("scrcpy-bin.old-{}", unique_suffix()));
+    let had_old = extract_path.exists();
+    if had_old {
+        std::fs::rename(extract_path, &backup)
+            .map_err(|e| format!("Failed to stage the current installation: {}", e))?;
+    }
+
+    match std::fs::rename(&source, extract_path) {
+        Ok(()) => {
+            if had_old {
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if had_old {
+                let _ = std::fs::rename(&backup, extract_path);
+            }
+            Err(format!("Failed to install scrcpy binaries: {}", e))
+        }
+    }
+}
+
+async fn download_scrcpy_inner(sink: Arc<EventSink>) -> Result<(), String> {
     let (os_tag, arch_tag, extension) = if cfg!(target_os = "windows") {
         let arch = windows_arch_tag(std::env::consts::ARCH);
         (arch, arch, ".zip")
@@ -2546,47 +3719,76 @@ pub async fn download_scrcpy(sink: Arc<EventSink>) -> Result<(), String> {
     let current_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+        .ok_or_else(|| "Could not locate the application directory".to_string())?;
 
-    let temp_archive_path = current_dir.join(format!("scrcpy_temp{}", extension));
+    let workspace = TempWorkspace::create(&current_dir)?;
+    let archive_path = workspace.root.join(if extension == ".zip" {
+        "package.zip"
+    } else {
+        "package.tar.gz"
+    });
     let extract_path = current_dir.join("scrcpy-bin");
 
+    let mut file = tokio::fs::File::create(&archive_path)
+        .await
+        .map_err(|e| format!("Failed to create archive file: {}", e))?;
+    let mut download_resp = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to download URL: {}", e))?
+        .error_for_status()
+        .map_err(|e| format!("Download request failed: {}", e))?;
+    let total_size = download_resp.content_length().unwrap_or(0);
+
+    sink.emit(
+        "scrcpy-log",
+        format!("[SYSTEM] Downloading: {} MB", total_size / 1024 / 1024),
+    );
+
+    let mut downloaded: u64 = 0;
+    let mut last_percent: Option<u64> = None;
+    let mut last_emit = Instant::now();
+    while let Some(chunk) = download_resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Download interrupted: {}", e))?
     {
-        let mut file = std::fs::File::create(&temp_archive_path)
-            .map_err(|e| format!("Failed to create archive file: {}", e))?;
-        let mut download_resp = client
-            .get(&download_url)
-            .send()
+        file.write_all(&chunk)
             .await
-            .map_err(|e| format!("Failed to connect to download URL: {}", e))?;
-        let total_size = download_resp.content_length().unwrap_or(0);
-
-        sink.emit(
-            "scrcpy-log",
-            format!("[SYSTEM] Downloading: {} MB", total_size / 1024 / 1024),
-        );
-
-        let mut hasher = Sha256::new();
-        let mut downloaded: u64 = 0;
-        while let Some(chunk) = download_resp.chunk().await.map_err(|e| e.to_string())? {
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .map_err(|e| format!("Failed to write chunk: {}", e))?;
-            downloaded += chunk.len() as u64;
-            if let Some(percent) = (downloaded * 100).checked_div(total_size) {
-                sink.emit("download-progress", json!({ "percent": percent }));
+            .map_err(|e| format!("Failed to write chunk: {}", e))?;
+        downloaded += chunk.len() as u64;
+        if let Some(percent) = (downloaded * 100).checked_div(total_size) {
+            if should_emit_progress(last_percent, percent, last_emit.elapsed()) {
+                let (event, payload) = download_progress_event(percent);
+                sink.emit(event, payload);
+                last_percent = Some(percent);
+                last_emit = Instant::now();
             }
         }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("Failed to flush archive file: {}", e))?;
+    file.sync_all()
+        .await
+        .map_err(|e| format!("Failed to sync archive file: {}", e))?;
+    if total_size > 0 && last_percent != Some(100) {
+        let (event, payload) = download_progress_event(100);
+        sink.emit(event, payload);
+    }
 
-        let actual_sha256 = hex::encode(hasher.finalize());
-        if actual_sha256 != expected_sha256 {
-            drop(file);
-            let _ = std::fs::remove_file(&temp_archive_path);
-            return Err(format!(
-                "SHA-256 mismatch for {}: expected {}, got {}",
-                filename, expected_sha256, actual_sha256
-            ));
-        }
+    let std_file = file.into_std().await;
+    let actual_sha256 =
+        tokio::task::spawn_blocking(move || verify_downloaded_file(std_file, downloaded))
+            .await
+            .map_err(|e| format!("Checksum task failed: {}", e))??;
+
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "SHA-256 mismatch for {}: expected {}, got {}",
+            filename, expected_sha256, actual_sha256
+        ));
     }
 
     sink.emit(
@@ -2598,65 +3800,44 @@ pub async fn download_scrcpy(sink: Arc<EventSink>) -> Result<(), String> {
         json!({ "type": "downloading", "success": true, "message": "Extracting binaries..." }),
     );
 
-    if extract_path.exists() {
-        let _ = std::fs::remove_dir_all(&extract_path);
-    }
+    let staging = workspace.root.join("extract");
+    let archive_for_task = archive_path.clone();
+    let staging_for_task = staging.clone();
+    let extension_for_task = extension.to_string();
+    tokio::task::spawn_blocking(move || {
+        extract_archive(&archive_for_task, &staging_for_task, &extension_for_task)
+    })
+    .await
+    .map_err(|e| format!("Extraction task failed: {}", e))??;
 
-    let temp_extract_dir = current_dir.join("temp_extract");
-    if temp_extract_dir.exists() {
-        let _ = std::fs::remove_dir_all(&temp_extract_dir);
-    }
-    std::fs::create_dir_all(&temp_extract_dir).map_err(|e| e.to_string())?;
+    let install_target = extract_path.clone();
+    tokio::task::spawn_blocking(move || install_extracted(&staging, &install_target))
+        .await
+        .map_err(|e| format!("Installation task failed: {}", e))??;
 
-    if extension == ".zip" {
-        sink.emit("scrcpy-log", "[SYSTEM] Decompressing ZIP archive...");
-        let file = std::fs::File::open(&temp_archive_path)
-            .map_err(|e| format!("Failed to open zip: {}", e))?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(|e| format!("Failed to read zip archive: {}", e))?;
-        archive
-            .extract(&temp_extract_dir)
-            .map_err(|e| format!("Failed to extract: {}", e))?;
-    } else {
-        sink.emit("scrcpy-log", "[SYSTEM] Decompressing TAR.GZ archive...");
-        let file = std::fs::File::open(&temp_archive_path)
-            .map_err(|e| format!("Failed to open tar.gz: {}", e))?;
-        let tar = GzDecoder::new(file);
-        let mut archive = Archive::new(tar);
-        archive
-            .unpack(&temp_extract_dir)
-            .map_err(|e| format!("Failed to extract tar: {}", e))?;
-    }
-
-    // Verify entries and move to scrcpy-bin
-    let mut entries = std::fs::read_dir(&temp_extract_dir).map_err(|e| e.to_string())?;
-    if let Some(entry) = entries.next() {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-
-        if path.is_dir() {
-            // Usually scrcpy archives contain a single root folder
-            let _ = std::fs::rename(&path, &extract_path)
-                .or_else(|_| copy_dir_all(&path, &extract_path));
-        } else {
-            // If files are in root, rename the whole temp dir
-            let _ = std::fs::rename(&temp_extract_dir, &extract_path)
-                .or_else(|_| copy_dir_all(&temp_extract_dir, &extract_path));
-        }
-    }
-
-    // Cleanup
-    if temp_extract_dir.exists() {
-        let _ = std::fs::remove_dir_all(&temp_extract_dir);
-    }
-    if temp_archive_path.exists() {
-        let _ = std::fs::remove_file(&temp_archive_path);
-    }
-
-    sink.emit("scrcpy-status", json!({ "type": "download-complete", "success": true, "message": extract_path.to_string_lossy() }));
+    sink.emit(
+        "scrcpy-status",
+        json!({ "type": "download-complete", "success": true, "message": extract_path.to_string_lossy() }),
+    );
     Ok(())
 }
 
+pub async fn download_scrcpy(sink: Arc<EventSink>) -> Result<(), String> {
+    let result = download_scrcpy_inner(sink.clone()).await;
+    if let Err(message) = &result {
+        sink.emit(
+            "scrcpy-status",
+            json!({
+                "type": "download-complete",
+                "success": false,
+                "message": message,
+            }),
+        );
+    }
+    result
+}
+
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub async fn get_videos_dir() -> Result<String, String> {
     super::video_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -2674,6 +3855,7 @@ pub async fn save_report(content: String, name: String) -> Result<String, String
     Ok(path.to_string_lossy().to_string())
 }
 
+#[allow(dead_code)] // legacy/unwired API, kept for follow-up
 pub async fn get_scrcpy_bin_dir() -> Result<String, String> {
     let current_dir = std::env::current_exe()
         .ok()
@@ -2797,9 +3979,15 @@ fn compare_versions(local: &str, remote: &str) -> bool {
 }
 
 pub async fn check_scrcpy_update(custom_path: Option<String>) -> serde_json::Value {
-    let local_version = match get_local_scrcpy_version(custom_path.clone()) {
-        Some(v) => v,
-        None => {
+    // `get_local_scrcpy_version` runs `scrcpy --version` synchronously; keep it
+    // off the async reactor.
+    let local_version = match tokio::task::spawn_blocking(move || {
+        get_local_scrcpy_version(custom_path)
+    })
+    .await
+    {
+        Ok(Some(version)) => version,
+        _ => {
             return json!({ "update_available": false, "local_version": null, "latest_version": null, "message": "Scrcpy not installed or not working" });
         }
     };

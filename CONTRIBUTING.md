@@ -12,8 +12,8 @@ is the human counterpart to `AGENTS.md` (which describes the architecture).
 | Python | `3.11+` | Only the standard library is used (no `pip install` needed). |
 | C++ build tools | — | Windows: Visual Studio C++ build tools. Linux: `build-essential pkg-config libssl-dev libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libudev-dev libasound2-dev`. |
 
-Rust is pinned because Rune requires it. Do not bump the `windows` crate
-independently of Rune's patched dependency set.
+Rust is pinned because Rune requires it. Do not bump the `windows` crate or
+`parley` independently of Rune's patched dependency set.
 
 ## Daily loop
 
@@ -53,6 +53,38 @@ not a silent auto-fix.
 Windows because font rasterisation differs per platform; the structural
 `--tree` checks are platform-independent and therefore run on both legs. PRs
 target `main`; pushes to an open PR cancel its previous run.
+
+## Runtime conventions
+
+Three invariants keep the shell and the backend in sync; check them before
+changing either side:
+
+- **Sessions are generation-scoped.** `commands::next_generation` issues a
+  per-device counter; `start_scrcpy` refuses to insert a process when the
+  generation moved while it was spawning, and `stop_scrcpy` bumps the counter
+  and sets the shutdown token before killing the process tree. `on_quit` calls
+  `shutdown_all()`, which blocks late inserts. A start failure must reach the
+  UI as an alert, never be discarded.
+- **Backend events are one contract.** `scrcpy-status` carries either
+  `{device,running}` or `{type,message,percent}`; download progress is
+  `{type:"download-progress",percent}` (at most one event per 1 % or 100 ms),
+  and the old top-level `download-progress` name is only a compatibility input.
+  `Ui::handle_event` is the single translation point.
+- **Overlays close top-down.** `Ui::close_top_layer` handles the open dropdown
+  (`open_select`) first, then toasts, dialogs, the settings drawer and the
+  console/advanced sections — the reverse of the order in which `view()` pushes
+  them. Dropdowns are anchored panels (`select_control`), never modal dialogs.
+
+## Testing
+
+Unit tests live in the module they cover (`src/backend/commands.rs`,
+`src/ui/state.rs`, `src/ui/kit.rs`, `src/i18n.rs`) and run with
+`cargo test --all-targets --locked`. Cover the pure parts of a change:
+argument building and camera facing, ADB/mDNS parsing, window-position maths,
+download filename sanitising, generation and stop helpers, event-to-state
+mapping, the layer stack and i18n fallback. `scripts/check.py` runs the
+same tests plus the seven structural scenes (522+ assertions) and the PNG
+goldens, so a new check belongs there.
 
 ## Visual baselines
 
@@ -136,5 +168,9 @@ The script updates both files atomically and verifies the write. To release:
   renormalise them as a side effect of an unrelated edit.
 - `.vscode/extensions.json` recommends the Rust/TOML/Python/EditorConfig
   extensions; the old Tauri recommendation was removed with the frontend.
-- `dependabot.yml` watches the workspace-root Cargo manifest and GitHub
-  Actions. Rune's git pins are upgraded manually (see above).
+- The brand glyph has one source, `icon.svg`. `icon.png`, `rune-app/icons/app.ico`
+  + `app-icon.png`, `rune-app/src/platform/tray-icon.rgba` and `icons::BRAND`
+  are its renderings; regenerate all of them together.
+- `dependabot.yml` watches the workspace-root Cargo manifest and GitHub Actions.
+  Rune's git pins are upgraded manually (see above), and `windows` / `parley`
+  are ignored because they belong to Rune's patched dependency set.

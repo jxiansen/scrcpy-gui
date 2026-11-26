@@ -1,6 +1,6 @@
 //! Application state and the bridge between Rune's UI thread and the async backend.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,19 +24,18 @@ pub struct Device {
 }
 
 impl Device {
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn label(&self) -> &str {
         if let Some(name) = &self.friendly {
             return name;
         }
         // Sidebar.formatDeviceLabel: strip the adb mDNS wrapper for display only.
+        // Keep the " (2)" conflict suffix: two devices resolving to the same
+        // mDNS instance name must stay distinguishable.
         let s = self.serial.as_str();
         if let Some(rest) = s.strip_prefix("adb-") {
             if let Some(pos) = rest.find("._adb-tls-connect._") {
-                let head = &rest[..pos];
-                return match head.rfind(" (") {
-                    Some(i) if head.ends_with(')') => &head[..i],
-                    _ => head,
-                };
+                return &rest[..pos];
             }
         }
         &self.model
@@ -59,11 +58,22 @@ impl SessionKind {
         }
     }
 
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn label(self) -> &'static str {
         match self {
             Self::Mirror => "Mirror",
             Self::Camera => "Camera",
             Self::Desktop => "Desktop",
+        }
+    }
+
+    /// Reads the persisted `config.session_mode`; unknown values fall back to
+    /// mirror, the same default the old frontend used.
+    pub fn from_mode(mode: &str) -> Self {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "camera" => Self::Camera,
+            "desktop" => Self::Desktop,
+            _ => Self::Mirror,
         }
     }
 }
@@ -106,6 +116,7 @@ pub struct SavedWindow {
 #[derive(Clone, Debug, Deserialize)]
 pub struct MdnsService {
     pub name: String,
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub service: String,
     pub address: String,
 }
@@ -147,7 +158,9 @@ pub struct Ui {
     pub history: Vec<String>,
     pub tab: SessionKind,
     pub transport: Transport,
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub adb_menu: bool,
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub confirm_kill_adb: bool,
     /// The "disconnect this device?" confirmation dialog.
     pub disconnect_confirm: bool,
@@ -178,9 +191,13 @@ pub struct Ui {
     pub is_refreshing: bool,
     pub connecting: bool,
     pub pairing: bool,
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub drop_hover: bool,
     pub remember_position: bool,
     busy: Arc<AtomicBool>,
+    /// Guards the 5 s single-pass fetch so a slow ADB call cannot stack a
+    /// second poll on top of it.
+    polling: Arc<AtomicBool>,
     friendly_names: Arc<Mutex<HashMap<String, String>>>,
     last_device_sig: Arc<Mutex<String>>,
     pub dark: bool,
@@ -198,6 +215,9 @@ pub struct Ui {
     update_checked: bool,
     update_path: Option<String>,
     pub download: Download,
+    /// The custom `scrcpy_path` a download replaced. If the download fails, the
+    /// old install is still the working one and the path is put back.
+    download_prev_path: Option<Option<String>>,
     pub waker: Option<Waker>,
     /// Set by `--scene compare-*`; freezes all asynchronous data for deterministic rendering.
     pub fixture: bool,
@@ -221,6 +241,7 @@ impl Default for Ui {
         let state: SharedState = Arc::new(crate::backend::ScrcpyState::default());
         let prefs = Prefs::open(PREFS_ID);
         let config: ScrcpyConfig = prefs.get("config").unwrap_or_else(default_config);
+        let tab = SessionKind::from_mode(&config.session_mode);
         let bg_color = config.background_color.clone().unwrap_or_default();
         let dark = prefs.get("dark").unwrap_or(true);
         let color_mode: String = prefs
@@ -243,7 +264,7 @@ impl Default for Ui {
             logs: Vec::new(),
             running: BTreeMap::new(),
             history,
-            tab: SessionKind::Mirror,
+            tab,
             transport: Transport::Usb,
             adb_menu: false,
             confirm_kill_adb: false,
@@ -271,6 +292,7 @@ impl Default for Ui {
             drop_hover: false,
             remember_position,
             busy: Arc::new(AtomicBool::new(false)),
+            polling: Arc::new(AtomicBool::new(false)),
             friendly_names: Arc::new(Mutex::new(HashMap::new())),
             last_device_sig: Arc::new(Mutex::new(String::new())),
             dark,
@@ -284,6 +306,7 @@ impl Default for Ui {
             update_checked: false,
             update_path: None,
             download: Download::default(),
+            download_prev_path: None,
             waker: None,
             fixture: false,
         }
@@ -314,7 +337,11 @@ impl Ui {
         self.update = None;
         self.toasts.clear();
         self.toast_seq = 0;
+        self.download = Download::default();
+        self.download_prev_path = None;
         self.connect_token.store(0, Ordering::SeqCst);
+        self.busy.store(false, Ordering::SeqCst);
+        self.polling.store(false, Ordering::SeqCst);
         self.connecting = false;
         self.is_refreshing = false;
         self.config.device = "706fc5a1".into();
@@ -356,13 +383,23 @@ impl Ui {
         self.refresh_devices();
         self.reconnect_history();
         self.start_history_reconnect();
+        self.start_device_poll();
     }
 
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut events = Vec::new();
         while let Ok(ev) = self.rx.try_recv() {
+            events.push(ev);
+        }
+        let changed = !events.is_empty();
+        // Download progress is high-frequency. The channel is unbounded, so a
+        // slow UI frame can leave a backlog; only the newest reading matters.
+        let last_progress = events.iter().rposition(is_download_progress);
+        for (index, ev) in events.into_iter().enumerate() {
+            if is_download_progress(&ev) && Some(index) != last_progress {
+                continue;
+            }
             self.handle_event(ev);
-            changed = true;
         }
         self.sync_taskbar();
         changed
@@ -376,6 +413,7 @@ impl Ui {
                 }
             }
             "scrcpy-status" => self.handle_status(&ev.payload),
+            "download-progress" => self.handle_download_progress(&ev.payload),
             "scrcpy-check" => {
                 if let Ok(v) = serde_json::from_value::<ScrcpyCheck>(ev.payload) {
                     self.scrcpy_ok = Some(v.found);
@@ -405,12 +443,35 @@ impl Ui {
                 }
             }
             "device-list" => {
-                if let Ok(devices) = serde_json::from_value::<Vec<Device>>(ev.payload) {
+                if let Ok(mut devices) = serde_json::from_value::<Vec<Device>>(ev.payload) {
+                    // Keep names learned by earlier passes even if this payload
+                    // only carries adb's model fields.
+                    {
+                        let mut names = self.friendly_names.lock().unwrap();
+                        for device in &mut devices {
+                            match device.friendly.clone() {
+                                Some(name) => {
+                                    names.insert(device.serial.clone(), name);
+                                }
+                                None => {
+                                    let name = names.get(&device.serial).cloned();
+                                    device.friendly = name;
+                                }
+                            }
+                        }
+                    }
                     self.devices = devices;
                 }
             }
             "adb-killed" => self.refresh_devices(),
             "refresh-request" => self.refresh_devices(),
+            "device-poll" => {
+                // The 5 s background poll is a single silent pass; the settle
+                // loop and connect already own the busy flags.
+                if !self.is_refreshing && !self.busy.load(Ordering::SeqCst) {
+                    self.refresh_mdns();
+                }
+            }
             "refresh-done" => {
                 self.is_refreshing = false;
                 self.connecting = false;
@@ -423,6 +484,9 @@ impl Ui {
                     let detail = tv(&self.locale, "logs.connectedSuccessfully", &[("ip", &ip)]);
                     self.show_toast(title, detail);
                     self.add_history(v.ip);
+                    // A wireless connect succeeded: refresh both lists now
+                    // instead of waiting up to 5 s for the background poll.
+                    self.refresh_devices();
                 }
             }
             "app-toast" => {
@@ -439,6 +503,17 @@ impl Ui {
                         .unwrap_or("")
                         .to_string();
                     self.show_toast(title.to_string(), description);
+                }
+            }
+            "app-alert" => {
+                if let Some(message) = ev.payload.get("message").and_then(Value::as_str) {
+                    self.alert = Some(message.to_string());
+                }
+                // A failed launch left no live session for this device.
+                if let Some(device) = ev.payload.get("device").and_then(Value::as_str) {
+                    if self.config.device == device {
+                        self.set_active_device(None);
+                    }
                 }
             }
             "toast-expire" => {
@@ -466,7 +541,20 @@ impl Ui {
             p.get("device").and_then(Value::as_str),
             p.get("running").and_then(Value::as_bool),
         ) {
-            self.running.insert(device.to_string(), running);
+            if running {
+                self.running.insert(device.to_string(), true);
+            } else {
+                self.running.remove(device);
+            }
+            // The OS recenter shortcut targets the selected device only while
+            // its session is live.
+            if self.config.device == device {
+                self.set_active_device(if running {
+                    Some(device.to_string())
+                } else {
+                    None
+                });
+            }
             return;
         }
         match p.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -478,10 +566,7 @@ impl Ui {
                     .unwrap_or("")
                     .into();
             }
-            "download-progress" => {
-                self.download.percent =
-                    p.get("percent").and_then(Value::as_u64).unwrap_or(0) as u32;
-            }
+            "download-progress" => self.handle_download_progress(p),
             "download-complete" => {
                 self.download.active = false;
                 self.download.success = p.get("success").and_then(Value::as_bool).unwrap_or(false);
@@ -491,6 +576,7 @@ impl Ui {
                     .unwrap_or("")
                     .into();
                 if self.download.success {
+                    self.download_prev_path = None;
                     let title = t(&self.locale, "onboarding.successBinariesActive").to_string();
                     let detail = if self.download.message.is_empty() {
                         t(&self.locale, "header.scrcpyReady").to_string()
@@ -501,11 +587,31 @@ impl Ui {
                     self.check_scrcpy();
                     self.refresh_devices();
                 } else {
+                    self.restore_download_path();
                     self.log(format!("[SYSTEM] {}", self.download.message));
                 }
             }
             _ => {}
         }
+    }
+
+    fn handle_download_progress(&mut self, p: &Value) {
+        self.download.active = true;
+        if let Some(percent) = p.get("percent").and_then(Value::as_u64) {
+            self.download.percent = percent.min(100) as u32;
+        }
+    }
+
+    /// Puts the custom install path back after a failed download: the new
+    /// binaries never landed, so the old folder is still the working one.
+    fn restore_download_path(&mut self) {
+        let Some(previous) = self.download_prev_path.take() else {
+            return;
+        };
+        self.config.scrcpy_path = previous;
+        self.save_config();
+        self.check_scrcpy();
+        self.refresh_devices();
     }
 
     /// Shows one kit toast for six seconds; at most three stay visible, the
@@ -530,6 +636,7 @@ impl Ui {
     }
 
     /// Drops the toast with `seq`; the close button and `toast-expire` both use it.
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn dismiss_toast(&mut self, seq: u64) {
         self.toasts.retain(|note| note.seq != seq);
     }
@@ -659,12 +766,10 @@ impl Ui {
     /// Stops every device's scrcpy process, as the tray menu's "Stop all" does.
     pub fn stop_all(&self) {
         let devices: Vec<String> = self
-            .state
-            .processes
-            .lock()
-            .unwrap()
-            .keys()
-            .cloned()
+            .running
+            .iter()
+            .filter(|(_, live)| **live)
+            .map(|(device, _)| device.clone())
             .collect();
         for device in devices {
             self.stop_session(&device);
@@ -696,12 +801,16 @@ impl Ui {
         }
     }
 
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn clear_history(&mut self) {
         self.history.clear();
         let _ = self.prefs.set("history", &self.history);
     }
 
     pub fn check_scrcpy(&self) {
+        if self.fixture {
+            return;
+        }
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         self.runtime.spawn(async move {
@@ -719,118 +828,29 @@ impl Ui {
         });
     }
 
-    /// One ADB + mDNS fetch, plus one friendly-name lookup per newly seen serial.
+    /// One ADB + mDNS fetch. A resolves the friendly names in the same call;
+    /// they are cached here so a later payload without them keeps its labels.
+    /// This is the single-pass path used by the 5 s poll and `refresh_mdns`;
+    /// the settle loop drives the same `fetch_and_emit`.
     fn fetch_devices_once(&self, silent: bool) {
+        if self.fixture || self.polling.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         let names = self.friendly_names.clone();
         let last_sig = self.last_device_sig.clone();
+        let polling = self.polling.clone();
         self.runtime.spawn(async move {
-            let v = commands::get_devices(path.clone()).await;
-            if v.get("error").and_then(Value::as_bool).unwrap_or(false) {
-                let message = v
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("ADB error");
-                if !silent {
-                    sink.emit("scrcpy-log", format!("[ADB ERROR] {message}"));
-                }
-                sink.emit("device-list", Vec::<Device>::new());
-                return;
-            }
-            let models = v
-                .get("deviceModels")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            let mut devices: Vec<Device> = v
-                .get("devices")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .map(|serial| Device {
-                            serial: serial.to_string(),
-                            model: models
-                                .get(serial)
-                                .and_then(Value::as_str)
-                                .unwrap_or(serial)
-                                .to_string(),
-                            friendly: names.lock().unwrap().get(serial).cloned(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let mdns = commands::get_mdns_devices(path.clone()).await;
-            let services = mdns
-                .get("services")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            sink.emit("mdns-list", services);
-
-            let targets: Vec<String> = devices
-                .iter()
-                .map(|d| d.serial.clone())
-                .filter(|serial| !names.lock().unwrap().contains_key(serial))
-                .collect();
-            for serial in &targets {
-                let emulator = serial
-                    .strip_prefix("emulator-")
-                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()));
-                let command = if emulator {
-                    "getprop ro.boot.qemu.avd_name; getprop ro.kernel.qemu.avd_name"
-                } else {
-                    "getprop ro.product.marketname; getprop ro.product.manufacturer; getprop ro.product.model"
-                };
-                let res = commands::adb_shell(serial.clone(), command.into(), path.clone()).await;
-                if res.get("success").and_then(Value::as_bool).unwrap_or(false) {
-                    let output = res.get("output").and_then(Value::as_str).unwrap_or("");
-                    let parts: Vec<&str> = output.lines().map(str::trim).collect();
-                    let name = if emulator {
-                        parts.iter().find(|s| !s.is_empty()).map(|s| {
-                            format!("{} ({serial})", s.replace('_', " "))
-                        })
-                    } else {
-                        let market = parts.first().copied().unwrap_or("");
-                        let manufacturer = parts.get(1).copied().unwrap_or("");
-                        let model = parts.get(2).copied().unwrap_or("");
-                        if !market.is_empty() {
-                            Some(market.to_string())
-                        } else if !manufacturer.is_empty()
-                            && !model.is_empty()
-                            && !model
-                                .to_lowercase()
-                                .starts_with(&manufacturer.to_lowercase())
-                        {
-                            Some(format!("{manufacturer} {model}"))
-                        } else if !model.is_empty() {
-                            Some(model.to_string())
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(name) = name {
-                        names.lock().unwrap().insert(serial.clone(), name.clone());
-                        if let Some(d) = devices.iter_mut().find(|d| d.serial == *serial) {
-                            d.friendly = Some(name);
-                        }
-                    }
-                }
-            }
-            *last_sig.lock().unwrap() = devices
-                .iter()
-                .map(|d| d.serial.as_str())
-                .collect::<Vec<_>>()
-                .join(",");
-            sink.emit("device-list", devices);
+            fetch_and_emit(&sink, path, &last_sig, &names, silent).await;
+            polling.store(false, Ordering::SeqCst);
         });
     }
 
     /// Manual refresh: up to 8 silent passes, 2 s apart, until the device set
     /// stops changing (mirrors `refreshDevicesUntilSettled` in the old hook).
     pub fn refresh_devices(&mut self) {
-        if self.busy.swap(true, Ordering::SeqCst) {
+        if self.fixture || self.busy.swap(true, Ordering::SeqCst) {
             return;
         }
         self.is_refreshing = true;
@@ -838,12 +858,13 @@ impl Ui {
         let busy = self.busy.clone();
         let sig = self.last_device_sig.clone();
         let names = self.friendly_names.clone();
+        let path = self.config.scrcpy_path.clone();
         self.runtime.spawn(async move {
             let mut previous = String::new();
             for i in 0..=8 {
-                fetch_and_emit(&sink, &sig, &names).await;
+                let ok = fetch_and_emit(&sink, path.clone(), &sig, &names, true).await;
                 let current = sig.lock().unwrap().clone();
-                if current == previous {
+                if !ok || current == previous {
                     break;
                 }
                 previous = current;
@@ -856,8 +877,31 @@ impl Ui {
         });
     }
 
+    /// A single silent device + mDNS pass. Also the body of the 5 s poll, so
+    /// both lists stay current without touching `is_refreshing` (no button
+    /// flicker, no overlap with a manual settle loop).
     pub fn refresh_mdns(&self) {
+        if self.fixture {
+            return;
+        }
         self.fetch_devices_once(true);
+    }
+
+    /// Emits a `device-poll` every 5 s; the UI thread runs a single silent
+    /// fetch unless a manual refresh or connect owns the busy state.
+    fn start_device_poll(&self) {
+        let sink = self.sink.clone();
+        self.runtime.spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // The first `interval` tick resolves immediately; setup already
+            // refreshed once, so wait for the first real period.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                sink.emit("device-poll", serde_json::json!({}));
+            }
+        });
     }
 
     fn start_history_reconnect(&self) {
@@ -871,23 +915,43 @@ impl Ui {
     }
 
     fn reconnect_history(&mut self) {
-        let connected: HashSet<String> = self.devices.iter().map(|d| d.serial.clone()).collect();
+        if self.fixture {
+            return;
+        }
+        // `adb devices` reports an mDNS transport as
+        // `adb-<serial>-<random>._adb-tls-connect._tcp`, never as the history's
+        // `ip:port`, so exact serial equality kept re-connecting live devices
+        // every 25 s. Match the address's host through the discovered mDNS
+        // service instead.
+        let devices = self.devices.clone();
+        let mdns = self.mdns.clone();
         let pending: Vec<String> = self
             .history
             .iter()
-            .filter(|ip| !connected.contains(*ip))
+            .filter(|ip| !history_entry_connected(ip, &devices, &mdns))
             .cloned()
             .collect();
         for ip in pending {
             let sink = self.sink.clone();
             let path = self.config.scrcpy_path.clone();
             self.runtime.spawn(async move {
-                let _ = commands::adb_connect(sink.clone(), ip, path, Some(true)).await;
+                let result = commands::adb_connect(sink.clone(), ip, path, Some(true)).await;
+                let ok = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v.get("success").and_then(Value::as_bool))
+                    .unwrap_or(false);
+                if ok {
+                    // A silent reconnect still has to surface the device: run
+                    // the settle refresh instead of waiting for the 5 s poll.
+                    sink.emit("refresh-request", serde_json::json!({}));
+                }
             });
         }
     }
 
     pub fn connect(&mut self, ip: String) {
+        self.open_select = None;
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         // A cancel or a newer connect bumps the token: a stale ADB attempt can
@@ -992,6 +1056,7 @@ impl Ui {
     }
 
     pub fn pair(&mut self, ip: String, code: String) {
+        self.open_select = None;
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         self.pairing = true;
@@ -1014,10 +1079,11 @@ impl Ui {
         if serial.is_empty() {
             return;
         }
-        if self.running.get(&serial).copied().unwrap_or(false) {
+        if self.session_live(&serial) {
             self.stop_session(&serial);
         }
         self.config.device.clear();
+        self.open_select = None;
         self.save_config();
         self.set_active_device(None);
     }
@@ -1026,7 +1092,7 @@ impl Ui {
     /// disconnects straight away.
     pub fn request_disconnect(&mut self) {
         let serial = self.config.device.as_str();
-        let live = !serial.is_empty() && self.running.get(serial).copied().unwrap_or(false);
+        let live = !serial.is_empty() && self.session_live(serial);
         if live {
             self.disconnect_confirm = true;
         } else {
@@ -1043,39 +1109,43 @@ impl Ui {
         self.disconnect_confirm = false;
     }
 
-    /// Closes the topmost layer, innermost dialog first; `false` means the key
-    /// was not handled and may bubble. Order: toasts, the modal dialogs, then
-    /// the settings / console / advanced drawers.
+    /// Closes the topmost layer, matching the reverse of `view()`'s `layer.push`
+    /// order: the open dropdown first, then toasts, modal dialogs, and finally
+    /// the settings / console / advanced drawers. `false` means the key was not
+    /// handled and may bubble.
     pub fn close_top_layer(&mut self) -> bool {
+        if self.open_select.take().is_some() {
+            return true;
+        }
         if self.toasts.pop().is_some() {
-            return true;
-        }
-        if self.connect_open {
-            self.connect_open = false;
-            return true;
-        }
-        if self.about_open {
-            self.about_open = false;
-            return true;
-        }
-        if self.confirm_kill_adb {
-            self.confirm_kill_adb = false;
-            return true;
-        }
-        if self.update.is_some() {
-            self.update = None;
-            return true;
-        }
-        if self.onboarding_open {
-            self.onboarding_open = false;
             return true;
         }
         if self.alert.is_some() {
             self.alert = None;
             return true;
         }
+        if self.onboarding_open {
+            self.onboarding_open = false;
+            return true;
+        }
+        if self.update.is_some() {
+            self.update = None;
+            return true;
+        }
         if self.disconnect_confirm {
             self.disconnect_confirm = false;
+            return true;
+        }
+        if self.confirm_kill_adb {
+            self.confirm_kill_adb = false;
+            return true;
+        }
+        if self.about_open {
+            self.about_open = false;
+            return true;
+        }
+        if self.connect_open {
+            self.connect_open = false;
             return true;
         }
         if self.settings_open {
@@ -1095,9 +1165,20 @@ impl Ui {
 
     pub fn select_device(&mut self, serial: String) {
         self.config.device = serial.clone();
+        self.open_select = None;
         self.save_config();
-        let running = self.running.get(&serial).copied().unwrap_or(false);
-        self.set_active_device(if running { Some(serial) } else { None });
+        // Selecting an idle device must not clear the active device of another
+        // device that is still running (Ctrl+Alt+Shift+C would stop recentring
+        // it). Only a running selection becomes authoritative here.
+        if self.session_live(&serial) {
+            self.set_active_device(Some(serial));
+        }
+    }
+
+    /// Live sessions come from the event-driven map; the backend's generation
+    /// table is the tie-breaker when an event has not reached the UI yet.
+    fn session_live(&self, serial: &str) -> bool {
+        self.running.get(serial).copied().unwrap_or(false) || commands::is_running(serial)
     }
 
     pub fn start_session(&mut self) {
@@ -1105,36 +1186,70 @@ impl Ui {
             self.alert = Some(t(&self.locale, "alerts.noDeviceSelectedMessage").to_string());
             return;
         }
+        if self.scrcpy_ok == Some(false) {
+            let message = if self.scrcpy_message.is_empty() {
+                t(&self.locale, "alerts.noDeviceSelectedMessage").to_string()
+            } else {
+                self.scrcpy_message.clone()
+            };
+            self.alert = Some(message);
+            return;
+        }
+        self.open_select = None;
         self.config.session_mode = self.tab.as_str().into();
         self.save_config();
+        let device = self.config.device.clone();
+        // Ctrl+Alt+Shift+C recentres the active device, so mark it before the
+        // child spawns; a failed launch clears it again through `app-alert`.
+        self.set_active_device(Some(device.clone()));
         self.log(tv(
             &self.locale,
             "logs.initializingScrcpy",
-            &[("device", &self.config.device)],
+            &[("device", &device)],
         ));
         let sink = self.sink.clone();
-        let state = self.state.clone();
+        let event_sink = (*sink).clone();
         let config = self.config.clone();
+        let locale = self.locale.clone();
+        let device_label = device.clone();
+        let generation = commands::next_generation(&device);
         self.runtime.spawn(async move {
-            let _ = commands::run_scrcpy(sink, state, config).await;
+            if let Err(e) = commands::start_scrcpy(device, generation, config, event_sink).await {
+                let message = tv(&locale, "logs.failedToStartScrcpy", &[("error", &e)]);
+                sink.emit("scrcpy-log", message.clone());
+                sink.emit(
+                    "app-alert",
+                    serde_json::json!({ "message": message, "device": device_label }),
+                );
+            }
         });
     }
 
     pub fn stop_session(&self, device: &str) {
-        let state = self.state.clone();
+        let sink = self.sink.clone();
+        if self.config.device == device {
+            self.set_active_device(None);
+        }
         let device = device.to_string();
         self.runtime.spawn(async move {
-            let _ = commands::stop_scrcpy(state, device).await;
+            if let Err(e) = commands::stop_scrcpy(&device).await {
+                sink.emit("scrcpy-log", format!("[ERROR] {e}"));
+            }
         });
     }
 
     pub fn download_scrcpy(&mut self) {
-        if self.download.active {
+        if self.download.active || self.fixture {
             return;
         }
         self.download.active = true;
+        self.download.percent = 0;
+        self.download.success = false;
+        self.open_select = None;
         // Download always extracts to the default exe-adjacent folder; a stale
-        // custom path would make the freshly installed binary invisible.
+        // custom path would make the freshly installed binary invisible. Keep
+        // it so a failed download can put the working install back.
+        self.download_prev_path = Some(self.config.scrcpy_path.clone());
         self.config.scrcpy_path = None;
         self.save_config();
         let sink = self.sink.clone();
@@ -1168,18 +1283,35 @@ impl Ui {
         });
     }
 
-    pub fn set_transport(&mut self, transport: Transport) {
-        self.transport = transport;
+    /// Switches the capture mode and persists it. Closing any open dropdown is
+    /// part of the switch: its options belong to the previous tab.
+    pub fn set_tab(&mut self, tab: SessionKind) {
+        self.open_select = None;
+        let changed = self.tab != tab || self.config.session_mode != tab.as_str();
+        self.tab = tab;
+        self.config.session_mode = tab.as_str().into();
+        if changed {
+            self.save_config();
+        }
     }
 
+    pub fn set_transport(&mut self, transport: Transport) {
+        self.transport = transport;
+        self.open_select = None;
+    }
+
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn toggle_adb_menu(&mut self) {
+        self.open_select = None;
         self.adb_menu = !self.adb_menu;
         if !self.adb_menu {
             self.confirm_kill_adb = false;
         }
     }
 
+    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn confirm_kill_adb(&mut self) {
+        self.open_select = None;
         if !self.confirm_kill_adb {
             self.confirm_kill_adb = true;
             return;
@@ -1250,10 +1382,11 @@ impl Ui {
         });
     }
 
+    /// Closes the update prompt and installs into the default folder.
+    /// `download_scrcpy` records the current custom path and clears it; a
+    /// failed download restores it in `handle_status`.
     pub fn update_now(&mut self) {
         self.update = None;
-        self.config.scrcpy_path = None;
-        self.save_config();
         self.download_scrcpy();
     }
 
@@ -1312,6 +1445,10 @@ impl Ui {
 
     pub fn set_scrcpy_path(&mut self, path: Option<String>) {
         self.config.scrcpy_path = path.filter(|p| !p.is_empty());
+        self.open_select = None;
+        // A manual folder choice is authoritative; a pending rollback would
+        // otherwise overwrite it on the next failed download.
+        self.download_prev_path = None;
         self.save_config();
         self.check_scrcpy();
         self.refresh_devices();
@@ -1323,68 +1460,350 @@ impl Ui {
     }
 }
 
-/// Used by the settle loop: fetch devices and publish a compact signature so
-/// the loop can tell whether the set changed between passes.
-async fn fetch_and_emit(
-    sink: &Arc<EventSink>,
-    last_sig: &Arc<Mutex<String>>,
-    names: &Arc<Mutex<HashMap<String, String>>>,
-) {
-    let v = commands::get_devices(None).await;
+/// True for both download-progress shapes: the typed `scrcpy-status` event and
+/// the legacy top-level name. `poll` uses it to drop superseded readings.
+fn is_download_progress(ev: &AppEvent) -> bool {
+    ev.name == "download-progress"
+        || (ev.name == "scrcpy-status"
+            && ev.payload.get("type").and_then(Value::as_str) == Some("download-progress"))
+}
+
+/// Copies the backend-resolved friendly names into the shared cache. A falls
+/// back to this map on every successful `get_devices`; older payloads may also
+/// expose it as `friendlyNames`.
+fn merge_backend_friendly(v: &Value, names: &Arc<Mutex<HashMap<String, String>>>) {
+    for key in ["friendly", "friendlyNames"] {
+        let Some(map) = v.get(key).and_then(Value::as_object) else {
+            continue;
+        };
+        let mut cache = names.lock().unwrap();
+        for (serial, name) in map {
+            if let Some(name) = name.as_str().filter(|name| !name.trim().is_empty()) {
+                cache.insert(serial.clone(), name.trim().to_string());
+            }
+        }
+    }
+}
+
+/// Builds the hub rows from either `["serial"]` or `{serial, model, friendly}`
+/// entries, preferring an explicit name, then the cache, then the adb model.
+fn devices_from_payload(v: &Value, names: &HashMap<String, String>) -> Vec<Device> {
     let models = v
         .get("deviceModels")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
-    let names_snapshot = names.lock().unwrap().clone();
-    let devices: Vec<Device> = v
-        .get("devices")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(|serial| Device {
-                    serial: serial.to_string(),
-                    model: models
-                        .get(serial)
+    let Some(entries) = v.get("devices").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut devices = Vec::new();
+    for entry in entries {
+        let (serial, model, friendly) = match entry {
+            Value::String(serial) => (serial.clone(), None, None),
+            Value::Object(object) => {
+                let Some(serial) = object.get("serial").and_then(Value::as_str) else {
+                    continue;
+                };
+                (
+                    serial.to_string(),
+                    object
+                        .get("model")
                         .and_then(Value::as_str)
-                        .unwrap_or(serial)
-                        .to_string(),
-                    friendly: names_snapshot.get(serial).cloned(),
-                })
-                .collect()
+                        .map(str::to_string),
+                    object
+                        .get("friendly")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                )
+            }
+            _ => continue,
+        };
+        let model = model
+            .or_else(|| {
+                models
+                    .get(&serial)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| serial.clone());
+        let friendly = friendly.or_else(|| names.get(&serial).cloned());
+        devices.push(Device {
+            serial,
+            model,
+            friendly,
+        });
+    }
+    devices
+}
+
+fn host_part(value: &str) -> &str {
+    value
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(value)
+}
+
+fn same_host(a: &str, b: &str) -> bool {
+    !a.is_empty() && host_part(a).eq_ignore_ascii_case(host_part(b))
+}
+
+/// Whether a recent `ip:port` is already in the hub. Exact serial equality
+/// covers plain `adb connect` sessions; a phone reconnecting over mDNS appears
+/// as `adb-<instance>._adb-tls-connect._tcp`, so compare the mDNS service's
+/// host (its advertised port is random) and instance name instead.
+fn history_entry_connected(entry: &str, devices: &[Device], mdns: &[MdnsService]) -> bool {
+    if devices.iter().any(|device| device.serial == entry) {
+        return true;
+    }
+    devices.iter().any(|device| {
+        mdns.iter().any(|service| {
+            device.serial.contains(service.name.as_str())
+                && (service.address == entry || same_host(&service.address, entry))
         })
-        .unwrap_or_default();
+    })
+}
+
+/// One ADB + mDNS pass shared by the settle loop, `refresh_mdns` and the 5 s
+/// poll. Publishes both lists and returns whether the device read succeeded; a
+/// failed read leaves the last good lists untouched.
+async fn fetch_and_emit(
+    sink: &Arc<EventSink>,
+    path: Option<String>,
+    last_sig: &Arc<Mutex<String>>,
+    names: &Arc<Mutex<HashMap<String, String>>>,
+    silent: bool,
+) -> bool {
+    let v = commands::get_devices(path.clone()).await;
+    if v.get("error").and_then(Value::as_bool).unwrap_or(false) {
+        if !silent {
+            let message = v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("ADB error");
+            sink.emit("scrcpy-log", format!("[ADB ERROR] {message}"));
+        }
+        return false;
+    }
+
+    merge_backend_friendly(&v, names);
+    let devices = {
+        let cache = names.lock().unwrap();
+        devices_from_payload(&v, &cache)
+    };
 
     let device_sig = devices
         .iter()
-        .map(|d| d.serial.as_str())
+        .map(|device| device.serial.as_str())
         .collect::<Vec<_>>()
         .join(",");
 
-    let mdns_v = commands::get_mdns_devices(None).await;
+    let previous = last_sig.lock().unwrap().clone();
+    let previous_mdns_sig = previous
+        .split_once('#')
+        .map(|(_, mdns)| mdns.to_string())
+        .unwrap_or_default();
+
+    let mdns_v = commands::get_mdns_devices(path).await;
+    let mdns_ok = !mdns_v
+        .get("error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let services: Vec<Value> = mdns_v
         .get("services")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
         .into_iter()
-        .filter(|v| {
-            let service = v.get("service").and_then(Value::as_str).unwrap_or("");
-            service.contains("_adb-tls-connect") || service.contains("_adb-tls-pairing")
+        .filter(|service| {
+            let kind = service.get("service").and_then(Value::as_str).unwrap_or("");
+            kind.contains("_adb-tls-connect") || kind.contains("_adb-tls-pairing")
         })
         .collect();
-    let mdns_sig = services
-        .iter()
-        .map(|v| {
-            format!(
-                "{}|{}",
-                v.get("address").and_then(Value::as_str).unwrap_or(""),
-                v.get("name").and_then(Value::as_str).unwrap_or("")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let mdns_sig = if mdns_ok {
+        services
+            .iter()
+            .map(|service| {
+                format!(
+                    "{}|{}",
+                    service.get("address").and_then(Value::as_str).unwrap_or(""),
+                    service.get("name").and_then(Value::as_str).unwrap_or("")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        previous_mdns_sig
+    };
+
     *last_sig.lock().unwrap() = format!("{device_sig}#{mdns_sig}");
     sink.emit("device-list", devices);
-    sink.emit("mdns-list", services);
+    if mdns_ok {
+        sink.emit("mdns-list", services);
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a `Ui` without touching prefs: `fixture` makes every `save_*`
+    /// call a no-op, and the default config replaces whatever is on disk.
+    #[allow(clippy::field_reassign_with_default)]
+    fn test_ui() -> Ui {
+        let mut ui = Ui::default();
+        ui.fixture = true;
+        ui.onboarding_open = false;
+        ui.config = default_config();
+        ui
+    }
+
+    #[test]
+    fn session_kind_reads_persisted_mode() {
+        assert_eq!(SessionKind::from_mode("mirror"), SessionKind::Mirror);
+        assert_eq!(SessionKind::from_mode("Camera"), SessionKind::Camera);
+        assert_eq!(SessionKind::from_mode(" DESKTOP "), SessionKind::Desktop);
+        assert_eq!(SessionKind::from_mode(""), SessionKind::Mirror);
+        assert_eq!(SessionKind::from_mode("unknown"), SessionKind::Mirror);
+    }
+
+    #[test]
+    fn set_tab_persists_session_mode_and_closes_dropdown() {
+        let mut ui = test_ui();
+        ui.open_select = Some("codec".into());
+        ui.set_tab(SessionKind::Camera);
+        assert_eq!(ui.tab, SessionKind::Camera);
+        assert_eq!(ui.config.session_mode, "camera");
+        assert_eq!(ui.open_select, None);
+    }
+
+    #[test]
+    fn running_false_removes_the_device() {
+        let mut ui = test_ui();
+        ui.handle_status(&serde_json::json!({ "device": "abc", "running": true }));
+        assert_eq!(ui.running.get("abc"), Some(&true));
+        ui.handle_status(&serde_json::json!({ "device": "abc", "running": false }));
+        assert!(!ui.running.contains_key("abc"));
+    }
+
+    #[test]
+    fn top_level_download_progress_is_still_accepted() {
+        let mut ui = test_ui();
+        ui.handle_event(AppEvent::new(
+            "download-progress",
+            serde_json::json!({ "percent": 42 }),
+        ));
+        assert_eq!(ui.download.percent, 42);
+        assert!(ui.download.active);
+    }
+
+    #[test]
+    fn poll_keeps_only_the_newest_progress_reading() {
+        let mut ui = test_ui();
+        ui.sink.emit(
+            "scrcpy-status",
+            serde_json::json!({ "type": "download-progress", "percent": 5 }),
+        );
+        ui.sink
+            .emit("download-progress", serde_json::json!({ "percent": 61 }));
+        ui.sink
+            .emit("download-progress", serde_json::json!({ "percent": 77 }));
+        assert!(ui.poll());
+        assert_eq!(ui.download.percent, 77);
+    }
+
+    #[test]
+    fn failed_download_restores_the_custom_path() {
+        let mut ui = test_ui();
+        ui.config.scrcpy_path = None;
+        ui.download_prev_path = Some(Some(r"C:\scrcpy".into()));
+        ui.handle_status(&serde_json::json!({
+            "type": "download-complete",
+            "success": false,
+            "message": "boom",
+        }));
+        assert_eq!(ui.config.scrcpy_path.as_deref(), Some(r"C:\scrcpy"));
+    }
+
+    #[test]
+    fn close_top_layer_closes_the_dropdown_before_toasts() {
+        let mut ui = test_ui();
+        ui.open_select = Some("codec".into());
+        ui.show_toast("t", "d");
+        assert!(ui.close_top_layer());
+        assert_eq!(ui.open_select, None);
+        assert_eq!(ui.toasts.len(), 1);
+        assert!(ui.close_top_layer());
+        assert!(ui.toasts.is_empty());
+    }
+
+    #[test]
+    fn close_top_layer_follows_the_view_push_order() {
+        let mut ui = test_ui();
+        ui.connect_open = true;
+        ui.alert = Some("alert".into());
+        ui.settings_open = true;
+        assert!(ui.close_top_layer());
+        assert_eq!(ui.alert, None);
+        assert!(ui.connect_open);
+        assert!(ui.close_top_layer());
+        assert!(!ui.connect_open);
+        assert!(ui.settings_open);
+        assert!(ui.close_top_layer());
+        assert!(!ui.settings_open);
+    }
+
+    #[test]
+    fn mdns_serial_label_strips_the_wrapper_and_keeps_conflicts() {
+        let device = Device {
+            serial: "adb-ZY22MGW35T-Z3uXXq (2)._adb-tls-connect._tcp".into(),
+            model: "PJA110".into(),
+            friendly: None,
+        };
+        assert_eq!(device.label(), "ZY22MGW35T-Z3uXXq (2)");
+        let named = Device {
+            friendly: Some("OnePlus 12".into()),
+            ..device
+        };
+        assert_eq!(named.label(), "OnePlus 12");
+    }
+
+    #[test]
+    fn history_matches_a_live_mdns_device_by_address() {
+        let devices = vec![Device {
+            serial: "adb-ABC123-random._adb-tls-connect._tcp".into(),
+            model: "Phone".into(),
+            friendly: None,
+        }];
+        let mdns = vec![MdnsService {
+            name: "adb-ABC123-random".into(),
+            service: "_adb-tls-connect._tcp".into(),
+            address: "192.168.1.5:38517".into(),
+        }];
+        assert!(history_entry_connected("192.168.1.5:5555", &devices, &mdns));
+        assert!(!history_entry_connected(
+            "192.168.1.6:5555",
+            &devices,
+            &mdns
+        ));
+        assert!(!history_entry_connected("192.168.1.5:5555", &devices, &[]));
+    }
+
+    #[test]
+    fn device_payload_merges_backend_friendly_names() {
+        let names = Arc::new(Mutex::new(HashMap::new()));
+        let payload = serde_json::json!({
+            "devices": ["abc", { "serial": "def", "model": "Pixel" }],
+            "deviceModels": { "abc": "adb model" },
+            "friendly": { "abc": "Galaxy S23" },
+        });
+        merge_backend_friendly(&payload, &names);
+        let devices = {
+            let cache = names.lock().unwrap();
+            devices_from_payload(&payload, &cache)
+        };
+        assert_eq!(devices[0].friendly.as_deref(), Some("Galaxy S23"));
+        assert_eq!(devices[0].model, "adb model");
+        assert_eq!(devices[1].serial, "def");
+        assert_eq!(devices[1].model, "Pixel");
+    }
 }

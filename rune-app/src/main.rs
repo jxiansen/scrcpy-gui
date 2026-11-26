@@ -4,9 +4,7 @@
 //! window and event loop; `backend::commands` keeps the scrcpy/adb logic and
 //! emits events into a channel that `Ui::poll` drains on the UI thread.
 
-// The command layer was ported wholesale; some helpers are kept for the next
-// wiring pass (friendly names, update modal, report export).
-#![allow(dead_code)]
+// Lints the ported command layer trips that are not worth restructuring.
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::items_after_test_module)]
 #![allow(clippy::too_many_arguments)]
@@ -20,6 +18,7 @@ mod ui;
 use rune::prefs::Prefs;
 use rune::{AppSpec, Tx, Waker};
 
+use crate::backend::commands;
 use crate::ui::Ui;
 use crate::ui::state::{SavedWindow, SessionKind};
 
@@ -59,7 +58,21 @@ fn scene_empty(s: &mut Ui) {
 }
 
 fn setup(ui: &mut Ui, waker: Waker) {
+    // `Ui::default` starts on Mirror before the prefs are read; restore the
+    // capture tab the user last saved. `set_tab` also writes `session_mode`.
+    let tab = session_tab(&ui.config.session_mode);
+    ui.set_tab(tab);
     ui.setup(waker);
+}
+
+/// The persisted `session_mode` back to its tab. Unknown or missing values keep
+/// mirror, matching the old frontend's fallback.
+fn session_tab(mode: &str) -> SessionKind {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "camera" => SessionKind::Camera,
+        "desktop" => SessionKind::Desktop,
+        _ => SessionKind::Mirror,
+    }
 }
 
 fn poll(ui: &mut Ui, _dt: f64, _tx: &mut Tx) -> bool {
@@ -76,14 +89,11 @@ fn escape_key(s: &mut Ui, ev: &rune::KeyEvent, _tx: &mut Tx) -> bool {
 }
 
 /// Kill every scrcpy child synchronously so closing the GUI leaves no orphans.
-/// `start_kill` only signals; it never waits (unlike `stop_scrcpy`'s 500 ms per
-/// device), so a Windows logoff or tray Quit stays fast.
+/// `shutdown_all` also blocks an in-flight `start_scrcpy` from inserting a new
+/// process afterwards; `start_kill` alone never waited and could not do that.
 fn on_quit(ui: &mut Ui, _tx: &mut Tx) {
     ui.save_window_placement();
-    let mut processes = ui.state.processes.lock().unwrap();
-    for (_, mut child) in processes.drain() {
-        let _ = child.start_kill();
-    }
+    commands::shutdown_all();
 }
 
 /// Save where the window is before it closes (also the tray's close-to-tray path).
@@ -185,5 +195,25 @@ fn main() {
     drop(tray);
     if !headless {
         rune::release_instance();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persisted_session_mode_restores_the_tab() {
+        assert_eq!(session_tab("mirror"), SessionKind::Mirror);
+        assert_eq!(session_tab("camera"), SessionKind::Camera);
+        assert_eq!(session_tab("desktop"), SessionKind::Desktop);
+        assert_eq!(session_tab(" Desktop "), SessionKind::Desktop);
+        assert_eq!(session_tab("CAMERA"), SessionKind::Camera);
+    }
+
+    #[test]
+    fn unknown_session_mode_falls_back_to_mirror() {
+        assert_eq!(session_tab(""), SessionKind::Mirror);
+        assert_eq!(session_tab("made-up"), SessionKind::Mirror);
     }
 }

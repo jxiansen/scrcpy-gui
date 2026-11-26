@@ -3,14 +3,15 @@
 Audit of the Rune native shell (branch `ui-kit-refactor`, Rune dev HEAD
 `ecbe830b`). Findings are ordered by severity; the last column is how each fix
 is verified. A shared fix contract lives outside the repo; the work was split
-across three parallel agents by file ownership (`ui/kit.rs` + `icons.rs`,
-`ui/state.rs` + `main.rs`, and the eight locale catalogs), with integration and
-baseline regeneration done by the main agent.
+across parallel agents by file ownership (UI shell + icons, state + main,
+locale catalogs, and docs/CI configuration), with integration and baseline
+regeneration done by the main agent.
 
 ## Method
 
 - Real launch: `target/debug/scrcpy-gui.exe`, window captured with `PrintWindow`.
-- Headless: six `--scene` fixtures rendered with `--snap` + `--tree`, plus six
+- Headless: six `--scene` fixtures at audit time (`compare-ar` was added by the
+  resolution, making seven) rendered with `--snap` + `--tree`, plus six
   `--script --at mark:state` interaction states (drawer, advanced, console,
   connect, empty-connect, Escape x2).
 - Structure: element roles, focus order, duplicate keys, `inert`, the
@@ -43,9 +44,9 @@ baseline regeneration done by the main agent.
 
 Modal focus trapping (192 / 193 background elements become `inert`, all
 focusable elements stay non-inert), no `--tree` warnings or offscreen elements
-in any of the six scenes, correct disabled state and label swap on the empty
-state's primary button, labelled selects / switches / sliders, tooltips on the
-status text, a close button and scrim click-to-close on the drawer, and a
+in any of the six scenes audited, correct disabled state and label swap on the
+empty state's primary button, labelled selects / switches / sliders, tooltips on
+the status text, a close button and scrim click-to-close on the drawer, and a
 confirmation dialog for "End ADB".
 
 ## Acceptance gate
@@ -59,15 +60,20 @@ output; the two must land in the same commit.
 
 ## Resolution — 2026-11-26
 
-All 17 findings were addressed. The work was split across three parallel agents
-(`ui/kit.rs` + `icons.rs`, `ui/state.rs` + `main.rs`, eight locale catalogs)
+All 17 findings were addressed. The work was split across parallel agents
+(UI shell + icons, state + main, eight locale catalogs, docs/CI configuration)
 against a shared interface contract; the main agent integrated, regenerated the
 structural baseline and re-blessed the goldens.
 
 Notable implementation details:
 
 - `AppSpec.on_key` handles `Key::Escape` through `Ui::close_top_layer()`, which
-  closes the topmost layer (toasts → dialogs → drawer → console → advanced).
+  closes the topmost layer (`open_select` → toasts → dialogs → drawer →
+  console → advanced).
+- Every dropdown goes through `kit.rs::select_control`: a light anchored panel
+  below its trigger, no scrim and no focus steal, dismissed by an outside
+  click, the trigger or Escape. It is deliberately not a modal `Dialog` (and
+  not rune-kit's `Select`, whose `anchored_fit` clips the list).
 - `Ui::toasts` is a bounded queue (three entries, `seq`-keyed removal), and
   `connect()` now has a 15 s timeout plus a cancellable token.
 - The connect dialog branches on `transport`: USB shows setup guidance and a
@@ -86,10 +92,10 @@ Notable implementation details:
 | --- | --- |
 | `python scripts/check.py` (full gate) | PASS |
 | `cargo fmt --all -- --check` / `clippy --all-targets --locked -D warnings` | PASS |
-| `cargo test --all-targets --locked` | 35 / 35 |
+| `cargo test --all-targets --locked` | PASS (commands + UI unit tests) |
 | `cargo build --all-targets --locked` | PASS |
-| `check_i18n.py` | 8 catalogs, 321 keys each, 0 empty translations |
-| Structural fixtures | 7 scenes, 517 assertions |
+| `check_i18n.py` | 8 catalogs, all keys present, 0 empty translations |
+| Structural fixtures | 7 scenes, 522+ assertions |
 | PNG goldens | 7 scenes, MAE = 0.000 |
 | Real launch stderr | 0 ICU4X warnings (was 46) |
 
@@ -102,4 +108,40 @@ Notable implementation details:
   it clears the selection directly (a smaller, recoverable action).
 - `compare-ar` intentionally validates safety invariants only, not RTL copy,
   and the debug build still prints Rune's first-frame timing hint.
+
+## Follow-up reliability pass — 2026-11-26
+
+A second review widened the scope from visual findings to runtime and
+repository hygiene. The same unreleased branch now also carries:
+
+- **Generation-scoped sessions.** `commands::next_generation` issues a
+  per-device counter; a spawn is accepted only while its generation is still
+  current, before and after the process starts, so a stale start can neither
+  overwrite a newer process nor become an orphan. `stop_scrcpy` bumps the
+  generation, sets the device's shutdown token, kills the whole tree
+  (`taskkill /F /T` on Windows) and verifies the exit. `shutdown_all()` runs
+  from `on_quit` and blocks late inserts. Start failures surface as an alert
+  instead of being swallowed, and the UI queries `commands::is_running`.
+- **One download-progress event.** Progress is now `scrcpy-status` with
+  `{type:"download-progress",percent}`, throttled to at most one event per 1 %
+  or 100 ms; the legacy top-level `download-progress` name is still accepted.
+  Downloads use a unique temporary directory, check the HTTP status and the
+  SHA-256, and only then replace the previous install, so a failure leaves the
+  working binary in place.
+- **Device refresh keeps the last good list.** The custom binary folder is
+  passed to both `adb devices` and `getprop`, mDNS serials are matched by
+  address rather than by an exact `ip:port` string, a transient failure no
+  longer clears the list, and a 5 s poll keeps devices and mDNS entries fresh.
+- **Preferences apply at the right time.** Sliders write to disk only on
+  release, the selected session tab is persisted as `config.session_mode` and
+  restored on start, and confirming a choice closes its dropdown.
+- **Three icon surfaces share one glyph.** The tray
+  (`platform/tray-icon.rgba`), the Windows executable resource
+  (`icons/app.ico` via `build.rs`) and the README (`icon.svg` / `icon.png`) are
+  renderings of the same phone → screen arrow as `icons::BRAND`.
+- **Tests cover the contracts.** Unit tests beside `commands.rs`, `state.rs`,
+  `kit.rs` and `i18n.rs` assert camera-facing and argument mapping, ADB/mDNS
+  parsing, window-position maths, download filename sanitising, generation and
+  shutdown helpers, event-to-state mapping, the layer stack and the i18n
+  fallback. The visual gates stay at seven scenes and 522+ assertions.
 

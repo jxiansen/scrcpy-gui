@@ -13,6 +13,7 @@ use rune_kit::{
 };
 use rune_theme_opencode as theme;
 
+use crate::backend::ScrcpyConfig;
 use crate::i18n::{language_name, t, tv};
 use crate::icons;
 use crate::ui::Ui;
@@ -74,6 +75,67 @@ fn display_option(locale: &str, key: &str, value: &str) -> String {
     t(locale, label).to_string()
 }
 
+/// What a lens choice stores. The named options are camera *facing* values;
+/// only a numeric id may go into `camera_id` (scrcpy rejects names there).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LensChoice {
+    /// Clear both fields and let scrcpy choose.
+    Auto,
+    /// `camera_facing`: back, front or external.
+    Facing(&'static str),
+    /// `camera_id`: a numeric camera index.
+    Id(String),
+}
+
+fn lens_choice(value: &str) -> Option<LensChoice> {
+    match value {
+        "Auto Select" => Some(LensChoice::Auto),
+        "Back" => Some(LensChoice::Facing("back")),
+        "Front" => Some(LensChoice::Facing("front")),
+        "External" => Some(LensChoice::Facing("external")),
+        other if !other.is_empty() && other.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(LensChoice::Id(other.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn write_lens_choice(config: &mut ScrcpyConfig, value: &str) {
+    match lens_choice(value) {
+        Some(LensChoice::Auto) => {
+            config.camera_id = None;
+            config.camera_facing = None;
+        }
+        Some(LensChoice::Facing(facing)) => {
+            config.camera_id = None;
+            config.camera_facing = Some(facing.to_string());
+        }
+        Some(LensChoice::Id(id)) => {
+            config.camera_id = Some(id);
+            config.camera_facing = None;
+        }
+        None => {}
+    }
+}
+
+/// The dropdown value matching the stored lens config, so a saved facing or id
+/// shows as the selected option again.
+fn lens_current(config: &ScrcpyConfig) -> String {
+    if let Some(id) = config
+        .camera_id
+        .as_deref()
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return id.to_string();
+    }
+    match config.camera_facing.as_deref() {
+        Some(facing) if facing.eq_ignore_ascii_case("back") => "Back".into(),
+        Some(facing) if facing.eq_ignore_ascii_case("front") => "Front".into(),
+        Some(facing) if facing.eq_ignore_ascii_case("external") => "External".into(),
+        _ => "Auto Select".into(),
+    }
+}
+
 fn apply_choice(s: &mut Ui, key: &str, v: &str) {
     match key {
         "fps" => s.config.fps = if v == "Auto" { None } else { v.parse().ok() },
@@ -84,13 +146,7 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
         "hwdec" => s.config.hwdec = Some(v.into()),
         "aspect" => s.config.camera_ar = Some(v.into()),
         "audio" => s.config.audio_codec = Some(v.into()),
-        "lens" => {
-            s.config.camera_id = if v == "Auto Select" {
-                None
-            } else {
-                Some(v.into())
-            }
-        }
+        "lens" => write_lens_choice(&mut s.config, v),
         "preset" => match v {
             "1080p" => {
                 s.config.vd_width = Some(1920);
@@ -118,8 +174,9 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
 /// Every dropdown goes through this helper. The option list is a light
 /// anchored panel under the trigger (not rune-kit's Select, whose
 /// `anchored_fit` squeezes it to ~50 px, and not a modal Dialog, which feels
-/// disruptive for a quick choice). No scrim, no focus steal; clicking an
-/// option or the trigger again closes it.
+/// disruptive for a quick choice). A transparent full-window press target sits
+/// under the panel, so an outside click dismisses it without a scrim and
+/// without blocking the visuals; the trigger toggles it too.
 fn select_control(
     s: &Ui,
     k: &Kit,
@@ -138,6 +195,15 @@ fn select_control(
     let current_label = display_option(&s.locale, key, current);
 
     if s.open_select.as_deref() == Some(key) {
+        // Below the panel in stacking order, transparent so it never hides the
+        // page; any click that misses an option lands here and closes the menu.
+        layer.push(
+            el().key(format!("{key}-options-outside"))
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(rune::Color::TRANSPARENT)
+                .a11y_hidden()
+                .on_press(|s: &mut Ui| s.open_select = None),
+        );
         let mut panel = col()
             .key(format!("{key}-options"))
             .w(200.0)
@@ -383,9 +449,13 @@ fn bitrate_field(s: &Ui, k: &Kit) -> El {
         .label(tr(s, "controlPanel.bitrate"))
         .hide_label()
         .width(SLIDER_W)
-        .on_change(|s: &mut Ui, v, _| {
+        .on_change(|s: &mut Ui, v, done| {
             s.config.bitrate = Some(v.round() as u32);
-            s.save_config();
+            // Only the release writes prefs; a drag would otherwise persist
+            // every intermediate value.
+            if done {
+                s.save_config();
+            }
         })
         .build(k);
     labeled_slider(
@@ -404,9 +474,11 @@ fn zoom_field(s: &Ui, k: &Kit) -> El {
         .label(tr(s, "controlPanel.cameraZoom"))
         .hide_label()
         .width(SLIDER_W)
-        .on_change(|s: &mut Ui, v, _| {
+        .on_change(|s: &mut Ui, v, done| {
             s.config.camera_zoom = Some(v);
-            s.save_config();
+            if done {
+                s.save_config();
+            }
         })
         .build(k);
     labeled_slider(
@@ -433,9 +505,11 @@ fn dimension_slider(
         .label(tr(s, label))
         .hide_label()
         .width(SLIDER_W)
-        .on_change(move |s: &mut Ui, v, _| {
+        .on_change(move |s: &mut Ui, v, done| {
             set(s, v.round() as u32);
-            s.save_config();
+            if done {
+                s.save_config();
+            }
         })
         .build(k);
     labeled_slider(k, tr(s, label), format!("{value}{unit}"), slider)
@@ -483,7 +557,7 @@ fn essential_fields(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
                 layer,
                 "lens",
                 LENSES,
-                s.config.camera_id.as_deref().unwrap_or("Auto Select"),
+                &lens_current(&s.config),
                 "controlPanel.cameraDevice",
             )),
             cell(select_field(
@@ -823,11 +897,14 @@ fn mode_row(s: &Ui, k: &Kit) -> El {
     .label(tr(s, "controlPanel.captureSource"))
     .width(Some(360.0))
     .on_pick(|s: &mut Ui, i, _| {
-        s.tab = match i {
+        let tab = match i {
             0 => SessionKind::Mirror,
             1 => SessionKind::Camera,
             _ => SessionKind::Desktop,
         };
+        // An open dropdown is anchored to controls that are about to unmount.
+        s.open_select = None;
+        s.set_tab(tab);
         s.advanced_open = false;
     })
     .build(k);
@@ -1019,11 +1096,7 @@ fn action_summary(s: &Ui, k: &Kit) -> El {
                 s.config.codec.clone().unwrap_or_else(|| "h264".into()),
             ],
             SessionKind::Camera => vec![
-                display_option(
-                    &s.locale,
-                    "lens",
-                    s.config.camera_id.as_deref().unwrap_or("Auto Select"),
-                ),
+                display_option(&s.locale, "lens", &lens_current(&s.config)),
                 display_option(
                     &s.locale,
                     "aspect",
@@ -1324,7 +1397,12 @@ fn topbar(s: &Ui, k: &Kit, insets: rune::ChromeInsets) -> El {
         .variant(IconButtonVariant::GhostMuted)
         .control_size(ControlSize::Regular)
         .label(tr(s, "settings.title"))
-        .on_press(|s: &mut Ui| s.settings_open = !s.settings_open)
+        .on_press(|s: &mut Ui| {
+            s.settings_open = !s.settings_open;
+            if !s.settings_open {
+                s.open_select = None;
+            }
+        })
         .build(k)
         .key("open-settings");
     col()
@@ -1730,6 +1808,7 @@ fn drawer_core(s: &Ui, k: &Kit) -> El {
             .control_size(ControlSize::Small)
             .on_press(|s: &mut Ui| {
                 s.settings_open = false;
+                s.open_select = None;
                 s.confirm_kill_adb = true;
             })
             .build(k),
@@ -1778,7 +1857,10 @@ fn settings_drawer(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) {
                 .variant(IconButtonVariant::GhostMuted)
                 .control_size(ControlSize::Regular)
                 .label(tr(s, "common.close"))
-                .on_press(|s: &mut Ui| s.settings_open = false)
+                .on_press(|s: &mut Ui| {
+                    s.settings_open = false;
+                    s.open_select = None;
+                })
                 .build(k)
                 .key("close-settings"),
         );
@@ -1799,14 +1881,34 @@ fn settings_drawer(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) {
                 })
                 .child(col().w_full().padding(16.0).gap(20.0).child(body)),
         );
+    // The drawer is modal, so its own subtree is the only place an outside
+    // click can be caught while a dropdown inside it is open. Popups are pushed
+    // after this panel, so option buttons stay above the catcher.
+    let panel = if s.open_select.is_some() {
+        panel.child(
+            el().key("settings-select-outside")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(rune::Color::TRANSPARENT)
+                .a11y_hidden()
+                .on_press(|s: &mut Ui| s.open_select = None),
+        )
+    } else {
+        panel
+    };
     let panel = k
         .elevate(panel, &k.elevation.overlay)
-        .modal(true, |s: &mut Ui| s.settings_open = false);
+        .modal(true, |s: &mut Ui| {
+            s.settings_open = false;
+            s.open_select = None;
+        });
     layer.push(
         el().key("settings-scrim")
             .pin(Some(0.0), Some(48.0), Some(0.0), Some(0.0))
             .fill(k.c.scrim)
-            .on_press(|s: &mut Ui| s.settings_open = false),
+            .on_press(|s: &mut Ui| {
+                s.settings_open = false;
+                s.open_select = None;
+            }),
     );
     layer.push(panel);
     layer.extend(popups);
@@ -2004,6 +2106,13 @@ fn locale_options(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
     if s.open_select.as_deref() != Some("locale") {
         return;
     }
+    layer.push(
+        el().key("locale-options-outside")
+            .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .fill(rune::Color::TRANSPARENT)
+            .a11y_hidden()
+            .on_press(|s: &mut Ui| s.open_select = None),
+    );
     let mut panel = col()
         .key("locale-options")
         .w(200.0)
@@ -2237,12 +2346,26 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     cx.caption_color(k.c.icon_muted);
     let insets = cx.chrome_insets();
     let mut layer = Vec::new();
+    if s.drop_hover {
+        layer.push(
+            el().key("drop-highlight")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(k.c.success.bg)
+                .opacity(0.18),
+        );
+    }
 
     let main = main_view(s, k, &mut layer);
     let shell = col()
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
+        .on_drop_files(|s: &mut Ui, files, _| {
+            for path in files {
+                s.handle_file(path.clone());
+            }
+        })
+        .on_drop_hover(|s: &mut Ui, over, _| s.drop_hover = over)
         .child(topbar(s, k, insets))
         .child(
             row()
@@ -2282,4 +2405,97 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     } else {
         rune::Direction::Ltr
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(camera_id: Option<&str>, camera_facing: Option<&str>) -> ScrcpyConfig {
+        ScrcpyConfig {
+            camera_id: camera_id.map(str::to_string),
+            camera_facing: camera_facing.map(str::to_string),
+            ..ScrcpyConfig::default()
+        }
+    }
+
+    #[test]
+    fn lens_names_map_to_camera_facing() {
+        assert_eq!(lens_choice("Back"), Some(LensChoice::Facing("back")));
+        assert_eq!(lens_choice("Front"), Some(LensChoice::Facing("front")));
+        assert_eq!(
+            lens_choice("External"),
+            Some(LensChoice::Facing("external"))
+        );
+        assert_eq!(lens_choice("Auto Select"), Some(LensChoice::Auto));
+    }
+
+    #[test]
+    fn only_numeric_values_become_camera_ids() {
+        assert_eq!(lens_choice("0"), Some(LensChoice::Id("0".into())));
+        assert_eq!(lens_choice("2"), Some(LensChoice::Id("2".into())));
+        assert_eq!(lens_choice("Rear"), None);
+        assert_eq!(lens_choice(""), None);
+    }
+
+    #[test]
+    fn facing_choices_never_land_in_camera_id() {
+        let mut config = config_with(Some("1"), None);
+
+        write_lens_choice(&mut config, "Front");
+        assert_eq!(config.camera_facing.as_deref(), Some("front"));
+        assert!(
+            config.camera_id.is_none(),
+            "facing must not write camera_id"
+        );
+
+        write_lens_choice(&mut config, "External");
+        assert_eq!(config.camera_facing.as_deref(), Some("external"));
+        assert!(config.camera_id.is_none());
+    }
+
+    #[test]
+    fn numeric_choices_write_camera_id_and_clear_facing() {
+        let mut config = config_with(None, Some("back"));
+
+        write_lens_choice(&mut config, "2");
+        assert_eq!(config.camera_id.as_deref(), Some("2"));
+        assert!(config.camera_facing.is_none());
+    }
+
+    #[test]
+    fn auto_clears_both_fields_and_unknown_values_change_nothing() {
+        let mut config = config_with(Some("3"), Some("front"));
+
+        write_lens_choice(&mut config, "Auto Select");
+        assert!(config.camera_facing.is_none());
+        assert!(config.camera_id.is_none());
+
+        let mut config = config_with(None, Some("back"));
+        write_lens_choice(&mut config, "Rear");
+        assert_eq!(config.camera_facing.as_deref(), Some("back"));
+        assert!(config.camera_id.is_none());
+    }
+
+    #[test]
+    fn lens_current_reflects_the_stored_field() {
+        let mut config = ScrcpyConfig::default();
+        assert_eq!(lens_current(&config), "Auto Select");
+
+        config.camera_facing = Some("back".into());
+        assert_eq!(lens_current(&config), "Back");
+        config.camera_facing = Some("FRONT".into());
+        assert_eq!(lens_current(&config), "Front");
+        config.camera_facing = Some("external".into());
+        assert_eq!(lens_current(&config), "External");
+
+        config.camera_facing = None;
+        config.camera_id = Some("1".into());
+        assert_eq!(lens_current(&config), "1");
+
+        // A legacy config may hold "Back" in camera_id; the backend ignores it,
+        // so the dropdown must not pretend it is a working camera choice.
+        config.camera_id = Some("Back".into());
+        assert_eq!(lens_current(&config), "Auto Select");
+    }
 }
