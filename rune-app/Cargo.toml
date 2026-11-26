@@ -1,8 +1,11 @@
 [package]
 name = "scrcpy-gui"
-version = "4.3.1"
+version = "4.3.2"
 edition.workspace = true
 license.workspace = true
+
+[build-dependencies]
+embed-resource = "3.0"
 
 [dependencies]
 rune = { workspace = true, features = ["native-file-dialog"] }
