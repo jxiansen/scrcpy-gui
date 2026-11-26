@@ -42,7 +42,7 @@ BASE_RECTS = {
     "mode-row": [372.5, 72, 720, 28],
     "device-head": [372.5, 116, 720, 51],
     "settings-card": [372.5, 183, 720, 585],
-    "advanced-toggle": [380.5, 492, 700, 24],
+    "advanced-toggle": [380.5, 448, 700, 24],
     "actionbar": [265, 784, 935, 61],
     "start-stop": [972.5, 797, 120, 36],
     "console": [265, 845, 935, 45],
@@ -243,7 +243,7 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
     if scene == "compare-desktop":
         # Desktop's fields are sliders rather than select buttons, so the
         # advanced row sits one row-height higher than in other modes.
-        rects["advanced-toggle"] = [380.5, 472, 700, 24]
+        rects["advanced-toggle"] = [380.5, 452, 700, 24]
     for key, rect in rects.items():
         check_rect(key, rect)
 

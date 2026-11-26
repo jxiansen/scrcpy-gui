@@ -115,10 +115,11 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
     s.save_config();
 }
 
-/// Every dropdown goes through this helper. It uses a full Dialog instead of
-/// rune-kit's Select: Select's anchored_fit collapses the popup to ~50 px
-/// inside a narrow Field, clipping every option label. A Dialog gives each
-/// option a readable full-width row.
+/// Every dropdown goes through this helper. The option list is a light
+/// anchored panel under the trigger (not rune-kit's Select, whose
+/// `anchored_fit` squeezes it to ~50 px, and not a modal Dialog, which feels
+/// disruptive for a quick choice). No scrim, no focus steal; clicking an
+/// option or the trigger again closes it.
 fn select_control(
     s: &Ui,
     k: &Kit,
@@ -136,47 +137,56 @@ fn select_control(
     let raw: Vec<String> = options.iter().map(|v| (*v).to_string()).collect();
     let current_label = display_option(&s.locale, key, current);
 
-    let mut body = col().w_full().gap(2.0);
-    for (i, option) in labels.iter().enumerate() {
-        let value = raw[i].clone();
-        let chosen = current == value.as_str();
-        body = body.child(
-            Button::new(option.clone())
-                .variant(if chosen {
-                    ButtonVariant::Contrast
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .control_size(ControlSize::Regular)
-                .on_press(move |s: &mut Ui| {
-                    apply_choice(s, key, &value);
-                    s.open_select = None;
-                })
-                .build(k),
-        );
+    if s.open_select.as_deref() == Some(key) {
+        let mut panel = col()
+            .key(format!("{key}-options"))
+            .w(200.0)
+            .fill(k.c.layer_02)
+            .radius(6.0)
+            .padding(4.0)
+            .gap(2.0)
+            .anchored(
+                format!("{key}-trigger"),
+                rune::Side::Bottom,
+                rune::Align::Start,
+                4.0,
+            );
+        for (i, option) in labels.iter().enumerate() {
+            let value = raw[i].clone();
+            let chosen = current == value.as_str();
+            panel = panel.child(
+                Button::new(option.clone())
+                    .variant(if chosen {
+                        ButtonVariant::Contrast
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut Ui| {
+                        apply_choice(s, key, &value);
+                        s.open_select = None;
+                    })
+                    .build(k),
+            );
+        }
+        layer.push(panel);
     }
 
-    Dialog::new(key, label)
-        .open(s.open_select.as_deref() == Some(key))
-        .width(360.0)
-        .fit()
-        .on_close(|s: &mut Ui| s.open_select = None)
-        .child(body)
-        .build(k, layer);
-
-    field(
-        label,
-        Button::new(current_label)
-            .variant(ButtonVariant::GhostMuted)
-            .control_size(ControlSize::Regular)
-            .on_press(move |s: &mut Ui| s.open_select = Some(key.into()))
-            .build(k)
-            .w(width)
-            .key(format!("{key}-trigger"))
-            .role("combobox")
-            .label(label),
-        k,
-    )
+    Button::new(current_label)
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .on_press(move |s: &mut Ui| {
+            s.open_select = if s.open_select.as_deref() == Some(key) {
+                None
+            } else {
+                Some(key.into())
+            };
+        })
+        .build(k)
+        .w(width)
+        .key(format!("{key}-trigger"))
+        .role("combobox")
+        .label(label)
 }
 
 fn field(label: &str, control: El, k: &Kit) -> El {
@@ -1596,15 +1606,19 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         .w_full()
         .gap(8.0)
         .child(pair_rows(switches))
-        .child(select_control(
-            s,
-            k,
-            layer,
-            "audio",
-            AUDIO_CODEC,
-            s.config.audio_codec.as_deref().unwrap_or("auto"),
+        .child(field(
             tr(s, "sessionBehavior.audioCodec"),
-            170.0,
+            select_control(
+                s,
+                k,
+                layer,
+                "audio",
+                AUDIO_CODEC,
+                s.config.audio_codec.as_deref().unwrap_or("auto"),
+                tr(s, "sessionBehavior.audioCodec"),
+                170.0,
+            ),
+            k,
         ));
     if s.config.record.unwrap_or(false) {
         content = content.child(
@@ -1986,18 +2000,33 @@ fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
         .build(k, layer);
 }
 
-fn locale_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
-    let mut body = col().w_full().gap(2.0);
+fn locale_options(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
+    if s.open_select.as_deref() != Some("locale") {
+        return;
+    }
+    let mut panel = col()
+        .key("locale-options")
+        .w(200.0)
+        .fill(k.c.layer_02)
+        .radius(6.0)
+        .padding(4.0)
+        .gap(2.0)
+        .anchored(
+            "locale-trigger",
+            rune::Side::Bottom,
+            rune::Align::Start,
+            4.0,
+        );
     for code in LOCALES {
         let chosen = *code;
-        body = body.child(
+        panel = panel.child(
             Button::new(language_name(&s.locale, chosen))
                 .variant(if s.locale == chosen {
                     ButtonVariant::Contrast
                 } else {
                     ButtonVariant::Ghost
                 })
-                .control_size(ControlSize::Regular)
+                .control_size(ControlSize::Small)
                 .on_press(move |s: &mut Ui| {
                     s.set_locale(chosen);
                     s.open_select = None;
@@ -2005,13 +2034,7 @@ fn locale_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .build(k),
         );
     }
-    Dialog::new("locale", tr(s, "header.languageLabel"))
-        .open(s.open_select.as_deref() == Some("locale"))
-        .width(360.0)
-        .fit()
-        .on_close(|s: &mut Ui| s.open_select = None)
-        .child(body)
-        .build(k, layer);
+    layer.push(panel);
 }
 
 fn about_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
@@ -2234,7 +2257,7 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     settings_drawer(s, k, &mut layer, system_dark);
     connect_dialog(s, k, &mut layer);
     about_dialog(s, k, &mut layer);
-    locale_dialog(s, k, &mut layer);
+    locale_options(s, k, &mut layer);
     end_adb_dialog(s, k, &mut layer);
     disconnect_dialog(s, k, &mut layer);
     update_dialog(s, k, &mut layer);
