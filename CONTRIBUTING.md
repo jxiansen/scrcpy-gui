@@ -39,7 +39,7 @@ It runs, in order:
 4. `cargo test --all-targets --locked`
 5. `cargo build --all-targets --locked`
 6. `scripts/check_i18n.py` — the eight locale catalogs
-7. `scripts/visual_tree_check.py` — all six structural fixture scenes
+7. `scripts/visual_tree_check.py` — all seven structural fixture scenes
 8. `scripts/visual_image_check.py --max-mae 8` — PNG goldens (unless
    `--no-golden`)
 
@@ -59,8 +59,9 @@ target `main`; pushes to an open PR cancel its previous run.
 See `tests/visual/README.md` for the three verification layers. Rules:
 
 - Structural assertions (`--tree`) are the hard gate. Run
-  `python scripts/visual_tree_check.py` for all six scenes, or pass a single
-  scene name while iterating. `python scripts/visual_tree_check.py --list`
+  `python scripts/visual_tree_check.py` for all seven scenes (including the
+  Arabic RTL `compare-ar` scene), or pass a single scene name while iterating.
+  `python scripts/visual_tree_check.py --list`
   lists them.
 - Golden PNGs are updated **only** with `python scripts/visual_image_check.py
   --bless` on Windows, after a deliberate visual change. Review the PNG diff

@@ -1,7 +1,7 @@
 //! Application state and the bridge between Rune's UI thread and the async backend.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rune::prefs::Prefs;
@@ -82,9 +82,11 @@ pub struct Download {
     pub success: bool,
 }
 
-/// One `rune_kit::Toast`'s copy; `None` in `Ui::toast` hides the region.
+/// One `rune_kit::Toast`'s copy; `Ui::toasts` holds at most three live notes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToastNote {
+    /// Monotonic id; `toast-expire` names the note it removes.
+    pub seq: u64,
     pub title: String,
     pub description: String,
 }
@@ -147,6 +149,8 @@ pub struct Ui {
     pub transport: Transport,
     pub adb_menu: bool,
     pub confirm_kill_adb: bool,
+    /// The "disconnect this device?" confirmation dialog.
+    pub disconnect_confirm: bool,
     /// The Connect / pair dialog.
     pub connect_open: bool,
     /// The About dialog.
@@ -166,8 +170,11 @@ pub struct Ui {
     pub alert: Option<String>,
     pub update: Option<UpdateInfo>,
     pub onboarding_open: bool,
-    pub toast: Option<ToastNote>,
+    pub toasts: Vec<ToastNote>,
     toast_seq: u64,
+    /// Bumped by `connect` and `cancel_connect`; a stale ADB task checks it so a
+    /// cancelled or superseded attempt cannot report success or reset the flags.
+    connect_token: Arc<AtomicU64>,
     pub is_refreshing: bool,
     pub connecting: bool,
     pub pairing: bool,
@@ -240,6 +247,7 @@ impl Default for Ui {
             transport: Transport::Usb,
             adb_menu: false,
             confirm_kill_adb: false,
+            disconnect_confirm: false,
             connect_open: false,
             about_open: false,
             settings_open: false,
@@ -254,8 +262,9 @@ impl Default for Ui {
             alert: None,
             update: None,
             onboarding_open: true,
-            toast: None,
+            toasts: Vec::new(),
             toast_seq: 0,
+            connect_token: Arc::new(AtomicU64::new(0)),
             is_refreshing: false,
             connecting: false,
             pairing: false,
@@ -299,10 +308,15 @@ impl Ui {
         self.connect_open = false;
         self.about_open = false;
         self.confirm_kill_adb = false;
+        self.disconnect_confirm = false;
         self.open_select = None;
         self.alert = None;
         self.update = None;
-        self.toast = None;
+        self.toasts.clear();
+        self.toast_seq = 0;
+        self.connect_token.store(0, Ordering::SeqCst);
+        self.connecting = false;
+        self.is_refreshing = false;
         self.config.device = "706fc5a1".into();
         self.config.session_mode = tab.as_str().into();
         self.config.bitrate = Some(8);
@@ -428,9 +442,8 @@ impl Ui {
                 }
             }
             "toast-expire" => {
-                let seq = ev.payload.get("seq").and_then(Value::as_u64);
-                if seq == Some(self.toast_seq) {
-                    self.toast = None;
+                if let Some(seq) = ev.payload.get("seq").and_then(Value::as_u64) {
+                    self.toasts.retain(|note| note.seq != seq);
                 }
             }
             "update-available" => {
@@ -495,19 +508,30 @@ impl Ui {
         }
     }
 
-    /// Shows one kit toast for a few seconds; a newer toast replaces the older copy.
+    /// Shows one kit toast for six seconds; at most three stay visible, the
+    /// oldest dropping off the back when a fourth arrives.
     pub fn show_toast(&mut self, title: impl Into<String>, description: impl Into<String>) {
         self.toast_seq += 1;
         let seq = self.toast_seq;
-        self.toast = Some(ToastNote {
+        self.toasts.push(ToastNote {
+            seq,
             title: title.into(),
             description: description.into(),
         });
+        if self.toasts.len() > 3 {
+            let extra = self.toasts.len() - 3;
+            self.toasts.drain(..extra);
+        }
         let sink = self.sink.clone();
         self.runtime.spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(6)).await;
             sink.emit("toast-expire", serde_json::json!({ "seq": seq }));
         });
+    }
+
+    /// Drops the toast with `seq`; the close button and `toast-expire` both use it.
+    pub fn dismiss_toast(&mut self, seq: u64) {
+        self.toasts.retain(|note| note.seq != seq);
     }
 
     pub fn log(&mut self, text: String) {
@@ -866,56 +890,105 @@ impl Ui {
     pub fn connect(&mut self, ip: String) {
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
+        // A cancel or a newer connect bumps the token: a stale ADB attempt can
+        // then neither report success nor clear the flags of its replacement.
+        let token = self.connect_token.fetch_add(1, Ordering::SeqCst) + 1;
+        let connect_token = self.connect_token.clone();
+        let timeout_title = t(&self.locale, "toast.connectTimeout").to_string();
+        let ip_label = ip.clone();
         self.is_refreshing = true;
         self.connecting = true;
         self.runtime.spawn(async move {
-            let result =
-                commands::adb_connect(sink.clone(), ip.clone(), path.clone(), Some(false)).await;
-            match result {
-                Ok(v) => {
-                    let message = v.get("message").and_then(Value::as_str).unwrap_or("");
-                    let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
-                    let lower = message.to_lowercase();
-                    let failed =
-                        lower.contains("failed to connect") || lower.contains("cannot connect");
-                    if !ok && failed {
-                        sink.emit(
-                            "scrcpy-log",
-                            "[SYSTEM] Retrying connection once...".to_string(),
-                        );
-                        let _ = commands::run_terminal_command(
-                            None,
-                            format!("adb disconnect {ip}"),
-                            path.clone(),
-                        )
+            let current = || connect_token.load(Ordering::SeqCst) == token;
+            let attempt = async {
+                let result =
+                    commands::adb_connect(sink.clone(), ip.clone(), path.clone(), Some(false))
                         .await;
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        if let Ok(retry) = commands::adb_connect(
-                            sink.clone(),
-                            ip.clone(),
-                            path.clone(),
-                            Some(false),
-                        )
-                        .await
-                        {
-                            let retry_ok = retry
-                                .get("success")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false);
-                            if retry_ok {
-                                sink.emit("history-add", serde_json::json!({ "ip": ip }));
-                            }
-                        }
-                    } else if ok {
-                        sink.emit("history-add", serde_json::json!({ "ip": ip }));
-                    }
-                    sink.emit("scrcpy-log", format!("[SYSTEM] {message}"));
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !current() {
+                    return;
                 }
-                Err(e) => sink.emit("scrcpy-log", format!("[ADB ERROR] {e}")),
+                match result {
+                    Ok(v) => {
+                        let message = v.get("message").and_then(Value::as_str).unwrap_or("");
+                        let ok = v.get("success").and_then(Value::as_bool).unwrap_or(false);
+                        let lower = message.to_lowercase();
+                        let failed =
+                            lower.contains("failed to connect") || lower.contains("cannot connect");
+                        if !ok && failed {
+                            sink.emit(
+                                "scrcpy-log",
+                                "[SYSTEM] Retrying connection once...".to_string(),
+                            );
+                            let _ = commands::run_terminal_command(
+                                None,
+                                format!("adb disconnect {ip}"),
+                                path.clone(),
+                            )
+                            .await;
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if !current() {
+                                return;
+                            }
+                            if let Ok(retry) = commands::adb_connect(
+                                sink.clone(),
+                                ip.clone(),
+                                path.clone(),
+                                Some(false),
+                            )
+                            .await
+                            {
+                                if !current() {
+                                    return;
+                                }
+                                let retry_ok = retry
+                                    .get("success")
+                                    .and_then(Value::as_bool)
+                                    .unwrap_or(false);
+                                if retry_ok {
+                                    sink.emit("history-add", serde_json::json!({ "ip": ip }));
+                                }
+                            }
+                        } else if ok {
+                            sink.emit("history-add", serde_json::json!({ "ip": ip }));
+                        }
+                        sink.emit("scrcpy-log", format!("[SYSTEM] {message}"));
+                    }
+                    Err(e) => sink.emit("scrcpy-log", format!("[ADB ERROR] {e}")),
+                }
+            };
+            let limit = std::time::Duration::from_secs(15);
+            let timed_out = tokio::time::timeout(limit, attempt).await.is_err();
+            if timed_out {
+                if current() {
+                    // The future is dropped here; `refresh-done` resets the
+                    // spinner through `handle_event`, like a normal completion.
+                    sink.emit(
+                        "app-toast",
+                        serde_json::json!({ "title": timeout_title, "description": ip_label }),
+                    );
+                    sink.emit("refresh-done", serde_json::json!({}));
+                }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if current() {
+                    sink.emit("refresh-done", serde_json::json!({}));
+                }
             }
-            sink.emit("refresh-done", serde_json::json!({}));
         });
+    }
+
+    /// Cancels an in-flight `connect`: clears the busy flags now, shows the
+    /// cancelled toast, and invalidates the ADB task so it stays silent.
+    pub fn cancel_connect(&mut self) {
+        self.connect_token.fetch_add(1, Ordering::SeqCst);
+        let was_connecting = self.connecting || self.is_refreshing;
+        self.connecting = false;
+        self.is_refreshing = false;
+        if was_connecting {
+            let title = t(&self.locale, "toast.connectCancelled").to_string();
+            let detail = self.ip.text.trim().to_string();
+            self.show_toast(title, detail);
+        }
     }
 
     pub fn pair(&mut self, ip: String, code: String) {
@@ -947,6 +1020,77 @@ impl Ui {
         self.config.device.clear();
         self.save_config();
         self.set_active_device(None);
+    }
+
+    /// Asks before clearing the device while its session is live; otherwise
+    /// disconnects straight away.
+    pub fn request_disconnect(&mut self) {
+        let serial = self.config.device.as_str();
+        let live = !serial.is_empty() && self.running.get(serial).copied().unwrap_or(false);
+        if live {
+            self.disconnect_confirm = true;
+        } else {
+            self.disconnect_device();
+        }
+    }
+
+    pub fn confirm_disconnect(&mut self) {
+        self.disconnect_confirm = false;
+        self.disconnect_device();
+    }
+
+    pub fn cancel_disconnect(&mut self) {
+        self.disconnect_confirm = false;
+    }
+
+    /// Closes the topmost layer, innermost dialog first; `false` means the key
+    /// was not handled and may bubble. Order: toasts, the modal dialogs, then
+    /// the settings / console / advanced drawers.
+    pub fn close_top_layer(&mut self) -> bool {
+        if self.toasts.pop().is_some() {
+            return true;
+        }
+        if self.connect_open {
+            self.connect_open = false;
+            return true;
+        }
+        if self.about_open {
+            self.about_open = false;
+            return true;
+        }
+        if self.confirm_kill_adb {
+            self.confirm_kill_adb = false;
+            return true;
+        }
+        if self.update.is_some() {
+            self.update = None;
+            return true;
+        }
+        if self.onboarding_open {
+            self.onboarding_open = false;
+            return true;
+        }
+        if self.alert.is_some() {
+            self.alert = None;
+            return true;
+        }
+        if self.disconnect_confirm {
+            self.disconnect_confirm = false;
+            return true;
+        }
+        if self.settings_open {
+            self.settings_open = false;
+            return true;
+        }
+        if self.console_open {
+            self.console_open = false;
+            return true;
+        }
+        if self.advanced_open {
+            self.advanced_open = false;
+            return true;
+        }
+        false
     }
 
     pub fn select_device(&mut self, serial: String) {

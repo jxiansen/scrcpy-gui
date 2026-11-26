@@ -59,7 +59,7 @@ svg_icon!(
 );
 svg_icon!(
     GEAR,
-    r#"<circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4 4.8 4.8M11.2 11.2l1.4 1.4M12.6 3.4 11.2 4.8M4.8 11.2 3.4 12.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#
+    r#"<circle cx="8" cy="8" r="4.8" stroke="currentColor" stroke-width="1.4" fill="none"/><circle cx="8" cy="8" r="1.9" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M8 1.2v2M8 12.8v2M1.2 8h2M12.8 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/>"#
 );
 svg_icon!(
     OFF,

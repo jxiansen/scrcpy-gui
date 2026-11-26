@@ -6,7 +6,7 @@ head, the settings card, the action bar, the collapsed console and the drawer
 states from Rune's `--tree` JSON.
 
 Usage:
-  python scripts/visual_tree_check.py                 # all six fixture scenes
+  python scripts/visual_tree_check.py                 # all seven fixture scenes
   python scripts/visual_tree_check.py compare-dark   # one scene (CI/legacy form)
   python scripts/visual_tree_check.py --list         # list available scenes
 """
@@ -30,28 +30,31 @@ SCENES = [
     "compare-desktop",
     "compare-en",
     "compare-empty",
+    "compare-ar",
 ]
 
+# Regenerated from --tree after the main content was vertically centred and
+# the primary button stopped being pinned to 148 px. See docs/ui-ux-audit.md.
 BASE_RECTS = {
     "topbar": [0, 0, 1200, 48],
     "rail": [0, 48, 264, 842],
     "main": [265, 48, 935, 842],
-    "mode-row": [372.5, 72, 720, 28],
-    "device-head": [372.5, 116, 720, 51],
-    "settings-card": [372.5, 183, 720, 301],
-    "advanced-toggle": [382.5, 450, 698, 24],
+    "mode-row": [372.5, 214, 720, 28],
+    "device-head": [372.5, 258, 720, 51],
+    "settings-card": [372.5, 325, 720, 301],
+    "advanced-toggle": [382.5, 592, 698, 24],
     "actionbar": [265, 784, 935, 61],
-    "start-stop": [944.5, 797, 148, 36],
+    "start-stop": [972.5, 797, 120, 36],
     "console": [265, 845, 935, 45],
     "open-settings": [1030, 11.5, 24, 24],
-    "segment0": [372.5, 72, 120, 28],
-    "segment1": [492.5, 72, 120, 28],
-    "segment2": [612.5, 72, 120, 28],
+    "segment0": [372.5, 214, 120, 28],
+    "segment1": [492.5, 214, 120, 28],
+    "segment2": [612.5, 214, 120, 28],
 }
 
 SCENE_START = {
-    "compare-camera": ("启用摄像头", "Engage Camera"),
-    "compare-desktop": ("投射到桌面", "Eject to Desktop"),
+    "compare-camera": ("启用摄像头", "Start Camera"),
+    "compare-desktop": ("投射到桌面", "Start Desktop"),
     "compare-empty": ("选择设备", "Select device"),
 }
 
@@ -59,16 +62,16 @@ SCENE_ADVANCED_COUNT = {
     "compare-camera": 7,
     "compare-desktop": 10,
 }
+# Mirror no longer duplicates "codec" in the advanced section.
+DEFAULT_ADVANCED_COUNT = 5
 
 COMMON_TEXTS_ZH = (
     "ScrcpyGUI",
     "设备中心",
     "设备",
     "引擎配置",
-    "画面、编码与输入控制。",
     "输入与音频",
     "系统控制台",
-    "改动将在下次启动时生效。",
 )
 
 COMMON_TEXTS_EN = (
@@ -76,11 +79,22 @@ COMMON_TEXTS_EN = (
     "Device Hub",
     "Devices",
     "Engine Configuration",
-    "Display, video and input controls.",
     "Input & audio",
     "System Console",
-    "Changes apply the next time you start a session.",
 )
+
+CARD_SUB_ZH = {
+    "compare-camera": "摄像头设备、画面与音频控制。",
+    "compare-desktop": "虚拟显示器尺寸与画面控制。",
+}
+CARD_SUB_EN = {
+    "compare-camera": "Camera, video and audio controls.",
+    "compare-desktop": "Virtual display size and video controls.",
+}
+CARD_SUB_MIRROR_ZH = "画面、编码与输入控制。"
+CARD_SUB_MIRROR_EN = "Display, video and input controls."
+MODE_NOTE_ZH = "会话参数改动将在下次启动时生效。"
+MODE_NOTE_EN = "Session settings apply the next time you start a session."
 
 RAW_KEY_PREFIXES = (
     "header.",
@@ -142,9 +156,20 @@ def state_script(key: str) -> list[dict]:
     ]
 
 
+def escape_script() -> list[dict]:
+    """Open the settings drawer, then press Escape and capture the result."""
+    return [
+        {"t": 0.02, "focus": True},
+        {"t": 0.1, "type": "tap", "key": "open-settings"},
+        {"t": 0.4, "type": "key", "name": "Escape"},
+        {"t": 0.8, "type": "mark", "name": "state"},
+    ]
+
+
 def check_scene(scene: str) -> tuple[int, list[str]]:
     tree = render(scene)
     english = scene == "compare-en"
+    arabic = scene == "compare-ar"
 
     elements = tree.get("elements", [])
     by_key = {}
@@ -174,31 +199,73 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
         for i, (a, e) in enumerate(zip(actual, expected)):
             check(f"{key}.rect[{i}]", abs(float(a) - float(e)) <= TOL, True)
 
+    texts = [e.get("text") for e in elements if isinstance(e.get("text"), str)]
+    labels = [e.get("label") for e in elements if isinstance(e.get("label"), str)]
+    all_text = texts + labels
+
+    if arabic:
+        # compare-ar is an RTL locale scene. Its copy is Arabic and its geometry
+        # may mirror, so the zh/en baselines do not apply: check safety only.
+        check("viewport", tree.get("viewport"), [1200.0, 890.0])
+        check("tree warnings", tree.get("warnings"), [])
+        vw, vh = tree.get("viewport", [0.0, 0.0])
+        offscreen = [
+            e.get("key")
+            for e in elements
+            if (rect := e.get("rect"))
+            and len(rect) == 4
+            and (
+                rect[0] < -1
+                or rect[1] < -1
+                or rect[0] + rect[2] > vw + 1
+                or rect[1] + rect[3] > vh + 1
+            )
+        ]
+        check("no offscreen elements", offscreen, [])
+        leaked_ar = [
+            text
+            for text in all_text
+            if text == "?" or text.startswith(RAW_KEY_PREFIXES)
+        ]
+        check("no untranslated/raw-key text", leaked_ar, [])
+        unlabeled = [
+            e.get("key")
+            for e in elements
+            if e.get("role") == "button" and not e.get("label") and not e.get("text")
+        ]
+        check("no unlabeled buttons", unlabeled, [])
+        check("element count", len(elements) > 100, True)
+        return checked, failures
+
     check("viewport", tree.get("viewport"), [1200.0, 890.0])
     check("tree warnings", tree.get("warnings"), [])
     for key, rect in BASE_RECTS.items():
         check_rect(key, rect)
 
-    texts = [e.get("text") for e in elements if isinstance(e.get("text"), str)]
-    labels = [e.get("label") for e in elements if isinstance(e.get("label"), str)]
-    all_text = texts + labels
-
-    for expected in COMMON_TEXTS_EN if english else COMMON_TEXTS_ZH:
+    common = list(COMMON_TEXTS_EN if english else COMMON_TEXTS_ZH)
+    card_sub = (CARD_SUB_EN if english else CARD_SUB_ZH).get(
+        scene, CARD_SUB_MIRROR_EN if english else CARD_SUB_MIRROR_ZH
+    )
+    common.append(card_sub)
+    for expected in common:
         check(f"text[{expected}]", expected in texts, True)
+
+    mode_note = MODE_NOTE_EN if english else MODE_NOTE_ZH
+    check("session-settings hint is not stale", mode_note in texts, False)
 
     start = by_key.get("start-stop")
     if start is None:
         failures.append("missing start-stop")
     else:
         check("start-stop.role", start.get("role"), "button")
-        zh_start, en_start = SCENE_START.get(scene, ("开始", "Start Mission"))
+        zh_start, en_start = SCENE_START.get(scene, ("开始", "Start"))
         check("start-stop.label", start.get("label"), en_start if english else zh_start)
 
     advanced = by_key.get("advanced-toggle")
     if advanced is None:
         failures.append("missing advanced-toggle")
     else:
-        count = SCENE_ADVANCED_COUNT.get(scene, 6)
+        count = SCENE_ADVANCED_COUNT.get(scene, DEFAULT_ADVANCED_COUNT)
         expected = (f"Advanced settings · {count}" if english else f"高级设置 · {count}")
         check("advanced-toggle.label", advanced.get("label"), expected)
         check("advanced-toggle.collapsed", advanced.get("expanded"), False)
@@ -241,6 +308,13 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
     ]
     check("no untranslated/raw-key text", leaked, [])
 
+    unlabeled = [
+        e.get("key")
+        for e in elements
+        if e.get("role") == "button" and not e.get("label") and not e.get("text")
+    ]
+    check("no unlabeled buttons", unlabeled, [])
+
     if english:
         cjk = [
             text
@@ -272,9 +346,48 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
             drawer_by_key.get("settings-drawer", {}).get("rect"),
             [820.0, 48.0, 380.0, 842.0],
         )
-        for expected in ("设置", "外观", "行为设置", "快捷键", "核心", "结束 ADB", "选择文件夹"):
+        for expected in ("设置", "外观", "行为设置", "核心", "结束 ADB", "选择文件夹"):
             check(f"drawer text[{expected}]", expected in drawer_texts, True)
+        check("shortcuts no longer in the drawer", "快捷键" in drawer_texts, False)
         check("drawer close button", "close-settings" in drawer_by_key, True)
+
+        about_tree = render(
+            scene,
+            [
+                {"t": 0.02, "focus": True},
+                {"t": 0.1, "type": "tap", "key": "about"},
+                {"t": 0.8, "type": "mark", "name": "state"},
+            ],
+        )
+        about_texts = [
+            el.get("text")
+            for el in about_tree.get("elements", [])
+            if isinstance(el.get("text"), str)
+        ]
+        check("shortcuts moved into About", "快捷键" in about_texts, True)
+        check(
+            "About keeps the version line",
+            any("ScrcpyGUI v" in text for text in about_texts),
+            True,
+        )
+
+        locale_tree = render(
+            scene,
+            [
+                {"t": 0.02, "focus": True},
+                {"t": 0.1, "type": "tap", "key": "open-settings"},
+                {"t": 0.35, "type": "tap", "key": "locale-trigger"},
+                {"t": 0.8, "type": "mark", "name": "state"},
+            ],
+        )
+        locale_texts = [
+            el.get("text")
+            for el in locale_tree.get("elements", [])
+            if isinstance(el.get("text"), str)
+        ]
+        check("language dialog opens", "语言" in locale_texts, True)
+        check("language options are readable", "English" in locale_texts, True)
+        check("CJK locale option is readable", "简体中文" in locale_texts, True)
 
         advanced_tree = render(scene, state_script("advanced-toggle"))
         advanced_by_key = {
@@ -315,6 +428,23 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
         for key in ("console-input", "console-export", "console-clear"):
             check(f"console key[{key}]", key in console_by_key, True)
 
+        esc_tree = render(scene, escape_script())
+        esc_keys = {
+            el.get("key")
+            for el in esc_tree.get("elements", [])
+            if el.get("key")
+        }
+        check("Escape closes the settings drawer", "settings-drawer" in esc_keys, False)
+
+        connect_tree = render(scene, state_script("open-connect"))
+        connect_keys = {
+            el.get("key")
+            for el in connect_tree.get("elements", [])
+            if el.get("key")
+        }
+        check("USB page offers a refresh action", "connect-refresh" in connect_keys, True)
+        check("USB page hides the IP form", "connect-ip" in connect_keys, False)
+
     return checked, failures
 
 
@@ -323,7 +453,7 @@ def main() -> int:
     parser.add_argument(
         "scenes",
         nargs="*",
-        help=f"one or more scenes (default: all six): {', '.join(SCENES)}",
+        help=f"one or more scenes (default: all seven): {', '.join(SCENES)}",
     )
     parser.add_argument("--list", action="store_true", help="list scenes and exit")
     args = parser.parse_args()

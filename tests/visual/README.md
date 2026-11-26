@@ -5,7 +5,7 @@ Three complementary checks, from deterministic to human-in-the-loop.
 ## Layer 1 — structural assertions (CI gate)
 
 ```bash
-python scripts/visual_tree_check.py                 # all six scenes (CI default)
+python scripts/visual_tree_check.py                 # all seven scenes (CI default)
 python scripts/visual_tree_check.py compare-dark   # one scene while iterating
 python scripts/visual_tree_check.py --list
 ```
@@ -15,10 +15,12 @@ labels, text and state flags from Rune's `--tree` JSON — plus the settings
 drawer, advanced card and expanded console states in `compare-dark`. This is
 the hard gate because it is immune to font rasterisation differences. CI runs
 it through `python scripts/check.py` on both Linux and Windows, covering all
-six scenes.
+seven scenes. The Arabic RTL `compare-ar` scene is checked for offscreen
+elements, raw i18n keys, unlabeled buttons and a non-empty tree rather than for
+zh/en copy.
 
 Fixtures (set with `--scene`): `compare-dark`, `compare-light`, `compare-camera`,
-`compare-desktop`, `compare-en`, `compare-empty`. They freeze appearance, locale,
+`compare-desktop`, `compare-en`, `compare-empty`, `compare-ar`. They freeze appearance, locale,
 device/mDNS lists, session mode, logs and the terminal timestamp, and skip all
 ADB/Prefs work.
 
@@ -32,7 +34,7 @@ python scripts/visual_image_check.py --scene compare-dark # limit a run to one s
 
 Only bless on Windows (see below), and review the PNG diff before committing.
 
-Renders the same six fixtures with `--snap`, compares each 2400×1780 PNG with
+Renders the same seven fixtures with `--snap`, compares each 2400×1780 PNG with
 `tests/visual/golden/<scene>.png`, and writes a heatmap + JSON report to
 `tests/visual/out/<scene>/`. Threshold: MAE ≤ 8 (default). `scripts/visual_diff.py`
 is a dependency-free PNG decoder/differ (stdlib only) and can compare any two

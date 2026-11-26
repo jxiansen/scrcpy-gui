@@ -8,8 +8,8 @@ use rune::{Cx, El, LiveRegion, ScrollSpec, col, el, row, text};
 use rune_kit::glyphs;
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, Field, IconButton, IconButtonVariant, Keybind, Kit,
-    SegmentedControl, Select, Sidebar, SidebarHeader, SidebarRow, SidebarSection, Slider, Spinner,
-    Switch, TextInput, Toast, ToastRegion, root,
+    Placement, SegmentedControl, Select, Sidebar, SidebarHeader, SidebarRow, SidebarSection,
+    Slider, Spinner, Switch, TextInput, Toast, ToastRegion, root,
 };
 use rune_theme_opencode as theme;
 
@@ -133,6 +133,9 @@ fn select_control(
     let current_label = display_option(&s.locale, key, current);
     Select::new(key, &labels)
         .width(width)
+        // Left-aligned so anchored_fit has room for the option labels; the
+        // default BottomEnd collapses to a sliver next to the right edge.
+        .placement(Placement::BottomStart)
         .current(Some(&current_label))
         .label(label)
         .appearance(rune_kit::SelectAppearance::Field)
@@ -540,17 +543,6 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
         s.config.rotation.as_deref().unwrap_or("0"),
         "controlPanel.rotation",
     )));
-    if !matches!(s.tab, SessionKind::Desktop) {
-        fields.push(cell(select_field(
-            s,
-            k,
-            layer,
-            "codec",
-            CODEC,
-            s.config.codec.as_deref().unwrap_or("h264"),
-            "controlPanel.codec",
-        )));
-    }
     fields.push(cell(select_field(
         s,
         k,
@@ -622,8 +614,11 @@ fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
 }
 
 fn advanced_count(s: &Ui) -> usize {
+    // The badge mirrors the advanced body per tab: `advanced_selects` builds the
+    // selector row, `advanced_content` adds bitrate/background rows and
+    // `advanced_switches` the toggles. Update this total together with them.
     match s.tab {
-        SessionKind::Mirror => 6,
+        SessionKind::Mirror => 5,
         SessionKind::Camera => 7,
         SessionKind::Desktop => 10,
     }
@@ -729,6 +724,11 @@ fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         SessionKind::Camera => &icons::CAMERA,
         SessionKind::Desktop => &icons::MONITOR,
     };
+    let sub = match s.tab {
+        SessionKind::Mirror => tr(s, "settings.cardSubMirror"),
+        SessionKind::Camera => tr(s, "settings.cardSubCamera"),
+        SessionKind::Desktop => tr(s, "settings.cardSubDesktop"),
+    };
     let mut body = col()
         .w_full()
         .gap(12.0)
@@ -763,7 +763,7 @@ fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         k,
         tr(s, "controlPanel.engineConfiguration"),
         icon,
-        tr(s, "settings.cardSub"),
+        sub,
         body,
     )
 }
@@ -789,20 +789,24 @@ fn mode_row(s: &Ui, k: &Kit) -> El {
         s.advanced_open = false;
     })
     .build(k);
-    row()
+    let mut bar = row()
         .key("mode-row")
         .w_full()
         .gap(16.0)
         .center_y()
         .mb(16.0)
         .child(segmented)
-        .child(row().grow(1.0))
-        .child(
+        .child(row().grow(1.0));
+    if s.running.get(&s.config.device).copied().unwrap_or(false) {
+        bar = bar.child(
             text(tr(s, "device.modeNote"))
                 .font(k.ty.small)
                 .color(k.c.text_faint)
-                .truncate(),
-        )
+                .truncate()
+                .help(tr(s, "device.modeNote")),
+        );
+    }
+    bar
 }
 
 fn has_device(s: &Ui) -> bool {
@@ -914,7 +918,7 @@ fn device_head(s: &Ui, k: &Kit) -> El {
                         Button::new(tr(s, "device.disconnect"))
                             .variant(ButtonVariant::GhostMuted)
                             .control_size(ControlSize::Regular)
-                            .on_press(|s: &mut Ui| s.disconnect_device())
+                            .on_press(|s: &mut Ui| s.request_disconnect())
                             .build(k)
                             .key("device-disconnect"),
                     ),
@@ -1049,7 +1053,7 @@ fn actionbar(s: &Ui, k: &Kit) -> El {
             }
         })
         .build(k)
-        .min_w(148.0)
+        .min_w(120.0)
         .key("start-stop");
     col()
         .key("actionbar")
@@ -1079,12 +1083,24 @@ fn console_strip(s: &Ui, k: &Kit) -> El {
         .last()
         .map(|(_, line)| line.clone())
         .unwrap_or_default();
+    let preview_text = text(preview)
+        .font(k.ty.mono)
+        .color(k.c.text_faint)
+        .truncate()
+        .grow(1.0);
+    let preview_text = if s.console_open {
+        preview_text
+    } else {
+        preview_text.live_region(LiveRegion::Polite)
+    };
     let mut header = row()
         .key("console-toggle")
         .w_full()
         .h(44.0)
         .px(32.0)
         .center_y()
+        .label(tr(s, "logPanel.systemConsole"))
+        .expanded(s.console_open)
         .focusable(true)
         .role("button")
         .on_press(|s: &mut Ui| s.console_open = !s.console_open);
@@ -1102,13 +1118,7 @@ fn console_strip(s: &Ui, k: &Kit) -> El {
                         .font(k.ty.ui_medium)
                         .color(k.c.text_muted),
                 )
-                .child(
-                    text(preview)
-                        .font(k.ty.mono)
-                        .color(k.c.text_faint)
-                        .truncate()
-                        .grow(1.0),
-                )
+                .child(preview_text)
                 .child(
                     rune::icon(
                         if s.console_open {
@@ -1210,6 +1220,8 @@ fn main_view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                 .w_full()
                 .max_w(720.0)
                 .self_center()
+                .grow(1.0)
+                .justify_center()
                 .child(mode_row(s, k))
                 .child(device_head(s, k))
                 .child(settings_card(s, k, layer)),
@@ -1316,8 +1328,7 @@ fn rail(s: &Ui, k: &Kit) -> El {
     if s.devices.is_empty() {
         devices.push(
             SidebarRow::new(tr(s, "sidebar.noDevicesDetected"))
-                .subtitle(tr(s, "sidebar.refresh"))
-                .on_select(|s: &mut Ui, _| s.refresh_devices())
+                .subtitle(tr(s, "sidebar.noDevicesHint"))
                 .build(k)
                 .key("no-devices"),
         );
@@ -1368,7 +1379,7 @@ fn rail(s: &Ui, k: &Kit) -> El {
             .w_full()
             .gap(2.0)
             .child(
-                SidebarRow::new(tr(s, "sidebar.connect"))
+                SidebarRow::new(tr(s, "sidebar.wirelessConnect"))
                     .icon(&icons::MONITOR)
                     .on_select(|s: &mut Ui, _| s.connect_open = true)
                     .build(k)
@@ -1433,38 +1444,20 @@ fn drawer_section(k: &Kit, title: &str, content: El) -> El {
         .child(content)
 }
 
-fn drawer_appearance(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) -> El {
+fn drawer_appearance(s: &Ui, k: &Kit, _layer: &mut Vec<El>, system_dark: bool) -> El {
     let selected = match s.color_mode.as_str() {
         "light" => 0,
         "dark" => 1,
         _ => 2,
     };
-    let language_labels: Vec<String> = LOCALES
-        .iter()
-        .map(|code| language_name(&s.locale, code).to_string())
-        .collect();
-    let language = Select::new("locale", &language_labels)
-        .width(180.0)
-        .current(Some(language_name(&s.locale, &s.locale)))
-        .label(tr(s, "header.languageLabel"))
-        .open(s.open_select.as_deref() == Some("locale"))
-        .on_toggle(|s: &mut Ui| {
-            s.open_select = if s.open_select.as_deref() == Some("locale") {
-                None
-            } else {
-                Some("locale".into())
-            }
-        })
-        .on_close(|s: &mut Ui| s.open_select = None)
-        .on_choose(|s: &mut Ui, label: &str, _| {
-            if let Some(i) = LOCALES
-                .iter()
-                .position(|code| language_name(&s.locale, code) == label)
-            {
-                s.set_locale(LOCALES[i]);
-            }
-        })
-        .build(k, layer);
+    // rune-kit's Select popup is clipped to 50 px inside the drawer by
+    // anchored_fit, so language selection opens a full Dialog instead.
+    let language = Button::new(language_name(&s.locale, &s.locale))
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .on_press(|s: &mut Ui| s.open_select = Some("locale".into()))
+        .build(k)
+        .key("locale-trigger");
     let themes = SegmentedControl::new(
         &[
             tr(s, "header.colorModes.light"),
@@ -1490,20 +1483,9 @@ fn drawer_appearance(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) ->
         .w_full()
         .gap(8.0)
         .child(themes)
-        .child(
-            row()
-                .w_full()
-                .h(28.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(tr(s, "header.languageLabel"))
-                        .font(k.ty.ui)
-                        .color(k.c.text_base)
-                        .grow(1.0),
-                )
-                .child(language),
-        )
+        // Wrapping in Field gives the trigger a real width; a bare Select in a
+        // drawer shrinks to its text and anchored_fit then clips the options.
+        .child(field(tr(s, "header.languageLabel"), language, k))
         .child(switch_row(
             k,
             tr(s, "header.panelOnTop"),
@@ -1585,29 +1567,20 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
             },
         ),
     ];
-    let mut content = col().w_full().gap(8.0).child(pair_rows(switches)).child(
-        row()
-            .w_full()
-            .h(28.0)
-            .gap(8.0)
-            .center_y()
-            .child(
-                text(tr(s, "sessionBehavior.audioCodec"))
-                    .font(k.ty.ui)
-                    .color(k.c.text_base)
-                    .grow(1.0),
-            )
-            .child(select_control(
-                s,
-                k,
-                layer,
-                "audio",
-                AUDIO_CODEC,
-                s.config.audio_codec.as_deref().unwrap_or("auto"),
-                tr(s, "sessionBehavior.audioCodec"),
-                170.0,
-            )),
-    );
+    let mut content = col()
+        .w_full()
+        .gap(8.0)
+        .child(pair_rows(switches))
+        .child(select_control(
+            s,
+            k,
+            layer,
+            "audio",
+            AUDIO_CODEC,
+            s.config.audio_codec.as_deref().unwrap_or("auto"),
+            tr(s, "sessionBehavior.audioCodec"),
+            170.0,
+        ));
     if s.config.record.unwrap_or(false) {
         content = content.child(
             row()
@@ -1639,8 +1612,24 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
     drawer_section(k, tr(s, "sessionBehavior.title"), content)
 }
 
+fn shortcut_row(k: &Kit, label: &str, keys: &[&str]) -> El {
+    row()
+        .w_full()
+        .h(28.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(label.to_string())
+                .font(k.ty.ui)
+                .color(k.c.text_muted)
+                .grow(1.0),
+        )
+        .child(Keybind::new(keys).build(k))
+}
+
 fn drawer_shortcuts(s: &Ui, k: &Kit) -> El {
-    let keys: [(&str, &str); 8] = [
+    let mut session = Vec::new();
+    for (key, label) in [
         ("F", "shortcuts.full"),
         ("H", "shortcuts.home"),
         ("B", "shortcuts.back"),
@@ -1649,25 +1638,28 @@ fn drawer_shortcuts(s: &Ui, k: &Kit) -> El {
         ("R", "shortcuts.rotate"),
         ("V", "shortcuts.paste"),
         ("O", "shortcuts.off"),
-    ];
-    let mut rows = Vec::new();
-    for (key, label) in keys {
-        rows.push(
-            row()
-                .w_full()
-                .h(28.0)
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(tr(s, label))
-                        .font(k.ty.ui)
-                        .color(k.c.text_muted)
-                        .grow(1.0),
-                )
-                .child(Keybind::new(&["Alt", key]).build(k)),
-        );
+    ] {
+        session.push(shortcut_row(k, tr(s, label), &["Alt", key]));
     }
-    drawer_section(k, tr(s, "shortcuts.title"), pair_rows(rows))
+    let mut app = Vec::new();
+    for (key, label) in [("C", "shortcuts.recenter"), ("W", "shortcuts.drag")] {
+        app.push(shortcut_row(
+            k,
+            tr(s, label),
+            &["Ctrl", "Alt", "Shift", key],
+        ));
+    }
+    drawer_section(
+        k,
+        tr(s, "shortcuts.title"),
+        col()
+            .w_full()
+            .gap(8.0)
+            .child(section_heading(k, tr(s, "shortcuts.sessionTitle")))
+            .child(pair_rows(session))
+            .child(section_heading(k, tr(s, "shortcuts.appTitle")))
+            .child(pair_rows(app)),
+    )
 }
 
 fn drawer_core(s: &Ui, k: &Kit) -> El {
@@ -1730,7 +1722,6 @@ fn settings_drawer(s: &Ui, k: &Kit, layer: &mut Vec<El>, system_dark: bool) {
         .gap(20.0)
         .child(drawer_appearance(s, k, &mut popups, system_dark))
         .child(drawer_behavior(s, k, &mut popups))
-        .child(drawer_shortcuts(s, k))
         .child(drawer_core(s, k));
     let header = row()
         .w_full()
@@ -1839,28 +1830,58 @@ fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                 .key("pair-code"),
         )
         .build(k);
-    let body = col()
-        .w_full()
-        .padding(16.0)
-        .gap(12.0)
-        .child(
-            SegmentedControl::new(
-                &[tr(s, "sidebar.usb"), tr(s, "sidebar.wifi")],
-                Some(if s.transport == Transport::Usb { 0 } else { 1 }),
-            )
-            .label(tr(s, "sidebar.deviceHub"))
-            .width(None)
-            .on_pick(|s: &mut Ui, i, _| {
-                s.transport = if i == 0 {
-                    Transport::Usb
-                } else {
-                    Transport::Wifi
-                };
-            })
-            .build(k),
-        )
-        .child(
-            row()
+    let transport = SegmentedControl::new(
+        &[tr(s, "sidebar.usb"), tr(s, "sidebar.wifi")],
+        Some(if s.transport == Transport::Usb { 0 } else { 1 }),
+    )
+    .label(tr(s, "sidebar.deviceHub"))
+    .width(None)
+    .on_pick(|s: &mut Ui, i, _| {
+        s.set_transport(if i == 0 {
+            Transport::Usb
+        } else {
+            Transport::Wifi
+        });
+    })
+    .build(k);
+    let mut body = col().w_full().padding(16.0).gap(12.0).child(transport);
+    match s.transport {
+        Transport::Usb => {
+            let mut actions = row().w_full().gap(8.0).items_center().child(
+                Button::new(tr(s, "connect.refreshDevices"))
+                    .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Regular)
+                    .disabled(s.is_refreshing)
+                    .on_press(|s: &mut Ui| s.refresh_devices())
+                    .build(k)
+                    .key("connect-refresh"),
+            );
+            if s.connecting {
+                actions = actions.child(
+                    Button::new(tr(s, "connect.cancel"))
+                        .variant(ButtonVariant::Ghost)
+                        .control_size(ControlSize::Regular)
+                        .on_press(|s: &mut Ui| s.cancel_connect())
+                        .build(k)
+                        .key("connect-cancel"),
+                );
+            }
+            body = body
+                .child(
+                    text(tr(s, "connect.usbTitle"))
+                        .font(k.ty.body_medium)
+                        .color(k.c.text_base),
+                )
+                .child(
+                    text(tr(s, "connect.usbBody"))
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .wrap(),
+                )
+                .child(actions);
+        }
+        Transport::Wifi => {
+            let mut submit = row()
                 .w_full()
                 .gap(8.0)
                 .items_end()
@@ -1880,47 +1901,90 @@ fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                     })
                     .build(k)
                     .key("connect-submit"),
-                ),
-        )
-        .child(
-            text(tr(s, "sidebar.discoveredDevices"))
-                .font(k.ty.small_medium)
-                .color(k.c.text_muted),
-        )
-        .child(mdns)
-        .child(
-            text(tr(s, "sidebar.pairDeviceTitle"))
-                .font(k.ty.small_medium)
-                .color(k.c.text_muted),
-        )
-        .child(row().w_full().gap(8.0).children([
-            col().grow(1.0).min_w(0.0).child(pair_ip),
-            col().grow(1.0).min_w(0.0).child(pair_code),
-        ]))
-        .child(
-            Button::new(if s.pairing {
-                tr(s, "sidebar.synchronizing")
-            } else {
-                tr(s, "sidebar.startPairing")
-            })
-            .variant(ButtonVariant::Neutral)
-            .control_size(ControlSize::Regular)
-            .disabled(
-                s.pair_ip.text.trim().is_empty() || s.pair_code.text.trim().is_empty() || s.pairing,
-            )
-            .on_press(|s: &mut Ui| {
-                let ip = s.pair_ip.text.clone();
-                let code = s.pair_code.text.clone();
-                s.pair(ip, code);
-            })
-            .build(k)
-            .key("pair-submit"),
-        );
+                );
+            if s.connecting {
+                submit = submit.child(
+                    Button::new(tr(s, "connect.cancel"))
+                        .variant(ButtonVariant::Ghost)
+                        .control_size(ControlSize::Large)
+                        .on_press(|s: &mut Ui| s.cancel_connect())
+                        .build(k)
+                        .key("connect-cancel"),
+                );
+            }
+            body = body
+                .child(submit)
+                .child(
+                    text(tr(s, "sidebar.discoveredDevices"))
+                        .font(k.ty.small_medium)
+                        .color(k.c.text_muted),
+                )
+                .child(mdns)
+                .child(
+                    text(tr(s, "sidebar.pairDeviceTitle"))
+                        .font(k.ty.small_medium)
+                        .color(k.c.text_muted),
+                )
+                .child(row().w_full().gap(8.0).children([
+                    col().grow(1.0).min_w(0.0).child(pair_ip),
+                    col().grow(1.0).min_w(0.0).child(pair_code),
+                ]))
+                .child(
+                    Button::new(if s.pairing {
+                        tr(s, "sidebar.synchronizing")
+                    } else {
+                        tr(s, "sidebar.startPairing")
+                    })
+                    .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Regular)
+                    .disabled(
+                        s.pair_ip.text.trim().is_empty()
+                            || s.pair_code.text.trim().is_empty()
+                            || s.pairing,
+                    )
+                    .on_press(|s: &mut Ui| {
+                        let ip = s.pair_ip.text.clone();
+                        let code = s.pair_code.text.clone();
+                        s.pair(ip, code);
+                    })
+                    .build(k)
+                    .key("pair-submit"),
+                );
+        }
+    }
     Dialog::new("connect", tr(s, "sidebar.connect"))
         .open(s.connect_open)
         .width(520.0)
         .fit()
         .on_close(|s: &mut Ui| s.connect_open = false)
+        .child(body)
+        .build(k, layer);
+}
+
+fn locale_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
+    let mut body = col().w_full().gap(2.0);
+    for code in LOCALES {
+        let chosen = *code;
+        body = body.child(
+            Button::new(language_name(&s.locale, chosen))
+                .variant(if s.locale == chosen {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .control_size(ControlSize::Regular)
+                .on_press(move |s: &mut Ui| {
+                    s.set_locale(chosen);
+                    s.open_select = None;
+                })
+                .build(k),
+        );
+    }
+    Dialog::new("locale", tr(s, "header.languageLabel"))
+        .open(s.open_select.as_deref() == Some("locale"))
+        .width(360.0)
+        .fit()
+        .on_close(|s: &mut Ui| s.open_select = None)
         .child(body)
         .build(k, layer);
 }
@@ -1945,7 +2009,8 @@ fn about_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                     text("Core: scrcpy · UI: Rune · Rust")
                         .font(k.ty.small)
                         .color(k.c.text_muted),
-                ),
+                )
+                .child(drawer_shortcuts(s, k)),
         )
         .build(k, layer);
 }
@@ -1967,6 +2032,47 @@ fn end_adb_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
                     })
                     .build(k),
             ),
+        )
+        .build(k, layer);
+}
+
+fn disconnect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
+    Dialog::new("disconnect", tr(s, "device.disconnectConfirmTitle"))
+        .open(s.disconnect_confirm)
+        .width(420.0)
+        .fit()
+        .on_close(|s: &mut Ui| s.cancel_disconnect())
+        .child(
+            col()
+                .w_full()
+                .padding(16.0)
+                .gap(12.0)
+                .child(
+                    text(tr(s, "device.disconnectConfirmBody"))
+                        .font(k.ty.small)
+                        .color(k.c.text_muted)
+                        .wrap(),
+                )
+                .child(
+                    row()
+                        .gap(8.0)
+                        .child(
+                            Button::new(tr(s, "device.disconnectConfirm"))
+                                .variant(ButtonVariant::Danger)
+                                .control_size(ControlSize::Regular)
+                                .on_press(|s: &mut Ui| s.confirm_disconnect())
+                                .build(k)
+                                .key("disconnect-confirm"),
+                        )
+                        .child(
+                            Button::new(tr(s, "common.cancel"))
+                                .variant(ButtonVariant::Ghost)
+                                .control_size(ControlSize::Regular)
+                                .on_press(|s: &mut Ui| s.cancel_disconnect())
+                                .build(k)
+                                .key("disconnect-cancel"),
+                        ),
+                ),
         )
         .build(k, layer);
 }
@@ -2103,21 +2209,29 @@ pub fn view(s: &Ui, cx: &mut Cx<Ui>) -> El {
     settings_drawer(s, k, &mut layer, system_dark);
     connect_dialog(s, k, &mut layer);
     about_dialog(s, k, &mut layer);
+    locale_dialog(s, k, &mut layer);
     end_adb_dialog(s, k, &mut layer);
+    disconnect_dialog(s, k, &mut layer);
     update_dialog(s, k, &mut layer);
     onboarding_dialog(s, k, &mut layer);
     alert_dialog(s, k, &mut layer);
-    if let Some(note) = &s.toast {
-        layer.push(
-            ToastRegion::new()
-                .toast(
-                    Toast::new("app-toast", note.title.clone())
-                        .description(note.description.clone())
-                        .on_close(|s: &mut Ui| s.toast = None)
-                        .build(k),
-                )
-                .build(k),
-        );
+    if !s.toasts.is_empty() {
+        let mut region = ToastRegion::new();
+        for note in &s.toasts {
+            let seq = note.seq;
+            region = region.toast(
+                Toast::new(format!("app-toast-{seq}"), note.title.clone())
+                    .description(note.description.clone())
+                    .on_close(move |s: &mut Ui| s.toasts.retain(|t| t.seq != seq))
+                    .build(k),
+            );
+        }
+        layer.push(region.build(k));
     }
-    root(shell, layer)
+    let page = root(shell, layer);
+    page.dir(if s.locale == "ar" {
+        rune::Direction::Rtl
+    } else {
+        rune::Direction::Ltr
+    })
 }

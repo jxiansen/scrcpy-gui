@@ -26,7 +26,7 @@ GOLDEN = ROOT / "tests" / "visual" / "golden"
 OUT = ROOT / "tests" / "visual" / "out"
 SCENES = [
     "compare-dark", "compare-light", "compare-camera", "compare-desktop",
-    "compare-en", "compare-empty",
+    "compare-en", "compare-empty", "compare-ar",
 ]
 
 
@@ -55,7 +55,7 @@ def main() -> int:
         "--scene",
         action="append",
         choices=SCENES,
-        help="render only this scene (repeatable; default: all six)",
+        help="render only this scene (repeatable; default: all seven)",
     )
     args = parser.parse_args()
 

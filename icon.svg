@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" color="#E6EDF3" role="img" aria-labelledby="icon1-title">
+  <title id="icon1-title">ScrcpyGUI: phone linking to a monitor</title>
+  <rect width="512" height="512" rx="112" fill="#0D1117"/>
+  <g stroke="currentColor" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" fill="none" shape-rendering="geometricPrecision">
+    <rect x="108" y="168" width="88" height="176" rx="22"/>
+    <rect x="292" y="212" width="112" height="88" rx="16"/>
+    <path d="M348 300v40"/>
+    <path d="M312 340h72"/>
+    <path d="M196 256h64"/>
+    <path d="M238 230l38 26-38 26"/>
+  </g>
+</svg>

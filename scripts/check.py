@@ -140,7 +140,7 @@ def main() -> int:
     parser.add_argument(
         "--scene",
         action="append",
-        help="run only this structural scene (repeatable; default: all six)",
+        help="run only this structural scene (repeatable; default: all seven)",
     )
     args = parser.parse_args()
     if args.fast and args.visual_only:

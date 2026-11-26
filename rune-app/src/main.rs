@@ -44,6 +44,11 @@ fn scene_en(s: &mut Ui) {
     s.set_locale("en");
 }
 
+fn scene_ar(s: &mut Ui) {
+    s.apply_fixture(false, SessionKind::Mirror);
+    s.set_locale("ar");
+}
+
 fn scene_empty(s: &mut Ui) {
     s.apply_fixture(false, SessionKind::Mirror);
     s.devices.clear();
@@ -59,6 +64,15 @@ fn setup(ui: &mut Ui, waker: Waker) {
 
 fn poll(ui: &mut Ui, _dt: f64, _tx: &mut Tx) -> bool {
     ui.poll()
+}
+
+/// Escape dismisses the topmost layer (toast, dialog or drawer); other keys
+/// keep their normal routing.
+fn escape_key(s: &mut Ui, ev: &rune::KeyEvent, _tx: &mut Tx) -> bool {
+    if ev.key != rune::Key::Escape {
+        return false;
+    }
+    s.close_top_layer()
 }
 
 /// Kill every scrcpy child synchronously so closing the GUI leaves no orphans.
@@ -90,6 +104,7 @@ fn main() {
         min_size: Some((1080.0, 760.0)),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(escape_key),
         fonts: rune_theme_opencode::FONTS,
         families: rune_theme_opencode::FAMILIES,
         scenes: &[
@@ -98,6 +113,7 @@ fn main() {
             ("compare-camera", scene_camera),
             ("compare-desktop", scene_desktop),
             ("compare-en", scene_en),
+            ("compare-ar", scene_ar),
             ("compare-empty", scene_empty),
         ],
         ..AppSpec::new("ScrcpyGUI", (1200.0, 890.0), Ui::default, ui::view)

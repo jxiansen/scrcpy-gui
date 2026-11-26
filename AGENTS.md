@@ -8,7 +8,7 @@ Node toolchain, and no mocked backend.
 ## Commands
 
 - `python scripts/check.py` — the single full gate: fmt, clippy, `--locked`
-  tests/build, repo consistency checks, i18n catalogs, all six structural
+  tests/build, repo consistency checks, i18n catalogs, all seven structural
   fixture scenes and PNG goldens. CI runs this on Windows and
   `check.py --no-golden` on Linux. `--fast` skips visual layers,
   `--visual-only` skips Rust checks, `--scene NAME` limits the structural run.
@@ -21,10 +21,11 @@ Node toolchain, and no mocked backend.
   CI checks (also covered by `check.py`).
 - `cargo build --release -p scrcpy-gui` — release binary.
 - `python scripts/visual_tree_check.py [scene]` — structural visual gate;
-  defaults to all six scenes (`compare-dark`, `compare-light`,
-  `compare-camera`, `compare-desktop`, `compare-en`, `compare-empty`), `--list`
-  lists them. Asserts the flat shell, device head, settings card, action bar,
-  console and the settings/advanced/console drawer states from Rune's `--tree`.
+  defaults to all seven scenes (`compare-dark`, `compare-light`,
+  `compare-camera`, `compare-desktop`, `compare-en`, `compare-empty`,
+  `compare-ar`), `--list` lists them. Asserts the flat shell, device head,
+  settings card, action bar, console and the settings/advanced/console drawer
+  states from Rune's `--tree`.
 - `python scripts/visual_image_check.py` — golden PNG regression (use `--bless`
   on Windows to update goldens); `python scripts/visual_diff.py A.png B.png` —
   generic PNG diff. See `tests/visual/README.md` for the old-vs-new procedure.
