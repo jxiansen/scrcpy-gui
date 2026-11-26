@@ -306,10 +306,16 @@ fn flat_card(k: &Kit, title: &str, icon: &'static rune::Icon, sub: &str, body: E
                 .color(k.c.text_muted)
                 .wrap(),
         )
-        .child(col().w_full().mt(10.0).gap(12.0).child(body));
+        .child(col().w_full().mt(10.0).gap(12.0).grow(1.0).child(body));
     row()
         .key("settings-card")
+        // Switching tabs mounts different Select/Slider nodes. Without this,
+        // their default presence fade overlaps the old ones on the same rect
+        // for ~0.25 s and the text looks blurry. Tab indicator lives outside
+        // this card, so it still animates.
+        .instant_changes()
         .w_full()
+        .grow(1.0)
         .items_stretch()
         .mt(16.0)
         .child(el().w(2.0).mt(8.0).mb(8.0).radius(2.0).fill(k.c.icon_base))
@@ -729,36 +735,40 @@ fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         SessionKind::Camera => tr(s, "settings.cardSubCamera"),
         SessionKind::Desktop => tr(s, "settings.cardSubDesktop"),
     };
-    let mut body = col()
+    // Keep the actual controls compact at the top of the card and pin the
+    // advanced entry to the bottom; the space between is intentional breathing
+    // room, not a stretched-out grid of fields.
+    let fields = col()
         .w_full()
-        .gap(12.0)
+        .gap(18.0)
         .child(grid(essential_fields(s, k, layer)))
         .child(
             col()
                 .w_full()
-                .gap(8.0)
+                .gap(10.0)
                 .child(section_heading(k, tr(s, "settings.inputGroup")))
                 .child(input_switches(s, k)),
         )
-        .child(el().h(1.0).w_full().fill(k.c.border_muted))
-        .child(
-            Button::new(format!(
-                "{} · {}",
-                tr(s, "advanced.title"),
-                advanced_count(s)
-            ))
-            .variant(ButtonVariant::GhostMuted)
-            .control_size(ControlSize::Regular)
-            .icon(&icons::SLIDERS)
-            .expanded(s.advanced_open)
-            .on_press(|s: &mut Ui| s.advanced_open = !s.advanced_open)
-            .build(k)
-            .justify_start()
-            .key("advanced-toggle"),
-        );
+        .child(el().h(1.0).w_full().fill(k.c.border_muted));
+    let mut body = col().w_full().grow(1.0).justify_start().child(fields);
     if s.advanced_open {
         body = body.child(advanced_content(s, k, layer));
     }
+    body = body.child(
+        Button::new(format!(
+            "{} · {}",
+            tr(s, "advanced.title"),
+            advanced_count(s)
+        ))
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .icon(&icons::SLIDERS)
+        .expanded(s.advanced_open)
+        .on_press(|s: &mut Ui| s.advanced_open = !s.advanced_open)
+        .build(k)
+        .justify_start()
+        .key("advanced-toggle"),
+    );
     flat_card(
         k,
         tr(s, "controlPanel.engineConfiguration"),
@@ -1221,7 +1231,6 @@ fn main_view(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                 .max_w(720.0)
                 .self_center()
                 .grow(1.0)
-                .justify_center()
                 .child(mode_row(s, k))
                 .child(device_head(s, k))
                 .child(settings_card(s, k, layer)),

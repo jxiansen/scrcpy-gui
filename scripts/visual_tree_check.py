@@ -33,23 +33,23 @@ SCENES = [
     "compare-ar",
 ]
 
-# Regenerated from --tree after the main content was vertically centred and
-# the primary button stopped being pinned to 148 px. See docs/ui-ux-audit.md.
+# Regenerated from --tree after the main content became top-aligned and the
+# settings card grew to fill the remaining height. See docs/ui-ux-audit.md.
 BASE_RECTS = {
     "topbar": [0, 0, 1200, 48],
     "rail": [0, 48, 264, 842],
     "main": [265, 48, 935, 842],
-    "mode-row": [372.5, 214, 720, 28],
-    "device-head": [372.5, 258, 720, 51],
-    "settings-card": [372.5, 325, 720, 301],
-    "advanced-toggle": [382.5, 592, 698, 24],
+    "mode-row": [372.5, 72, 720, 28],
+    "device-head": [372.5, 116, 720, 51],
+    "settings-card": [372.5, 183, 720, 585],
+    "advanced-toggle": [382.5, 452, 698, 24],
     "actionbar": [265, 784, 935, 61],
     "start-stop": [972.5, 797, 120, 36],
     "console": [265, 845, 935, 45],
     "open-settings": [1030, 11.5, 24, 24],
-    "segment0": [372.5, 214, 120, 28],
-    "segment1": [492.5, 214, 120, 28],
-    "segment2": [612.5, 214, 120, 28],
+    "segment0": [372.5, 72, 120, 28],
+    "segment1": [492.5, 72, 120, 28],
+    "segment2": [612.5, 72, 120, 28],
 }
 
 SCENE_START = {
