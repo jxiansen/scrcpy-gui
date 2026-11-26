@@ -8,8 +8,8 @@ use rune::{Cx, El, LiveRegion, ScrollSpec, col, el, row, text};
 use rune_kit::glyphs;
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, Field, IconButton, IconButtonVariant, Keybind, Kit,
-    Placement, SegmentedControl, Select, Sidebar, SidebarHeader, SidebarRow, SidebarSection,
-    Slider, Spinner, Switch, TextInput, Toast, ToastRegion, root,
+    SegmentedControl, Sidebar, SidebarHeader, SidebarRow, SidebarSection, Slider, Spinner, Switch,
+    TextInput, Toast, ToastRegion, root,
 };
 use rune_theme_opencode as theme;
 
@@ -115,6 +115,10 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
     s.save_config();
 }
 
+/// Every dropdown goes through this helper. It uses a full Dialog instead of
+/// rune-kit's Select: Select's anchored_fit collapses the popup to ~50 px
+/// inside a narrow Field, clipping every option label. A Dialog gives each
+/// option a readable full-width row.
 fn select_control(
     s: &Ui,
     k: &Kit,
@@ -131,29 +135,48 @@ fn select_control(
         .collect();
     let raw: Vec<String> = options.iter().map(|v| (*v).to_string()).collect();
     let current_label = display_option(&s.locale, key, current);
-    Select::new(key, &labels)
-        .width(width)
-        // Left-aligned so anchored_fit has room for the option labels; the
-        // default BottomEnd collapses to a sliver next to the right edge.
-        .placement(Placement::BottomStart)
-        .current(Some(&current_label))
-        .label(label)
-        .appearance(rune_kit::SelectAppearance::Field)
+
+    let mut body = col().w_full().gap(2.0);
+    for (i, option) in labels.iter().enumerate() {
+        let value = raw[i].clone();
+        let chosen = current == value.as_str();
+        body = body.child(
+            Button::new(option.clone())
+                .variant(if chosen {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .control_size(ControlSize::Regular)
+                .on_press(move |s: &mut Ui| {
+                    apply_choice(s, key, &value);
+                    s.open_select = None;
+                })
+                .build(k),
+        );
+    }
+
+    Dialog::new(key, label)
         .open(s.open_select.as_deref() == Some(key))
-        .on_toggle(move |s: &mut Ui| {
-            s.open_select = if s.open_select.as_deref() == Some(key) {
-                None
-            } else {
-                Some(key.into())
-            }
-        })
+        .width(360.0)
+        .fit()
         .on_close(|s: &mut Ui| s.open_select = None)
-        .on_choose(move |s: &mut Ui, chosen: &str, _| {
-            if let Some(i) = labels.iter().position(|l| l == chosen) {
-                apply_choice(s, key, &raw[i]);
-            }
-        })
-        .build(k, layer)
+        .child(body)
+        .build(k, layer);
+
+    field(
+        label,
+        Button::new(current_label)
+            .variant(ButtonVariant::GhostMuted)
+            .control_size(ControlSize::Regular)
+            .on_press(move |s: &mut Ui| s.open_select = Some(key.into()))
+            .build(k)
+            .w(width)
+            .key(format!("{key}-trigger"))
+            .role("combobox")
+            .label(label),
+        k,
+    )
 }
 
 fn field(label: &str, control: El, k: &Kit) -> El {
