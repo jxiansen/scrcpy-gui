@@ -318,7 +318,6 @@ fn flat_card(k: &Kit, title: &str, icon: &'static rune::Icon, sub: &str, body: E
         .grow(1.0)
         .items_stretch()
         .mt(16.0)
-        .child(el().w(2.0).mt(8.0).mb(8.0).radius(2.0).fill(k.c.icon_base))
         .child(inner)
 }
 

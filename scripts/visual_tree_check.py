@@ -42,7 +42,7 @@ BASE_RECTS = {
     "mode-row": [372.5, 72, 720, 28],
     "device-head": [372.5, 116, 720, 51],
     "settings-card": [372.5, 183, 720, 585],
-    "advanced-toggle": [382.5, 452, 698, 24],
+    "advanced-toggle": [380.5, 452, 700, 24],
     "actionbar": [265, 784, 935, 61],
     "start-stop": [972.5, 797, 120, 36],
     "console": [265, 845, 935, 45],
