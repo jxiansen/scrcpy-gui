@@ -59,11 +59,11 @@ SCENE_START = {
 }
 
 SCENE_ADVANCED_COUNT = {
-    "compare-camera": 10,
-    "compare-desktop": 12,
+    "compare-camera": 19,
+    "compare-desktop": 22,
 }
 # Mirror no longer duplicates "codec" in the advanced section.
-DEFAULT_ADVANCED_COUNT = 9
+DEFAULT_ADVANCED_COUNT = 17
 
 COMMON_TEXTS_ZH = (
     "ScrcpyGUI",
@@ -303,7 +303,11 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
 
     check("console collapsed", by_key.get("console", {}).get("rect", [0, 0, 0, 0])[3], 45)
     check("console body absent", "console-lines" in by_key, False)
-    check("advanced fields absent", "rotation-trigger" in by_key, False)
+    check(
+        "advanced fields absent",
+        "display_orientation-trigger" in by_key,
+        False,
+    )
     check("settings gear", "open-settings" in by_key, True)
 
     leaked = [
@@ -410,7 +414,11 @@ def check_scene(scene: str) -> tuple[int, list[str]]:
             advanced_by_key.get("advanced-toggle", {}).get("expanded"),
             True,
         )
-        check("advanced fields built", "rotation-trigger" in advanced_by_key, True)
+        check(
+            "advanced fields built",
+            "display_orientation-trigger" in advanced_by_key,
+            True,
+        )
         check("advanced vsync row", "垂直同步" in advanced_texts, True)
         check(
             "settings-card grows",

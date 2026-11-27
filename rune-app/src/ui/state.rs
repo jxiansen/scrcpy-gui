@@ -159,6 +159,32 @@ pub struct VideoEncoder {
     pub hw: bool,
 }
 
+/// One device camera from `scrcpy --list-cameras`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CameraEntry {
+    pub id: u32,
+    #[serde(default)]
+    pub facing: String,
+    #[serde(default)]
+    pub size: String,
+}
+
+/// One capture size from `scrcpy --list-camera-sizes`, grouped by camera.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CameraSizeEntry {
+    #[serde(default)]
+    pub camera: Option<u32>,
+    pub size: String,
+}
+
+/// One launchable app from `scrcpy --list-apps`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AppEntry {
+    pub package: String,
+    #[serde(default)]
+    pub label: String,
+}
+
 #[derive(Deserialize)]
 struct ScrcpyCheck {
     found: bool,
@@ -199,6 +225,12 @@ pub struct Ui {
     pub displays: Vec<DisplayEntry>,
     /// Video encoders reported by `scrcpy --list-encoders` for the current codec.
     pub video_encoders: Vec<VideoEncoder>,
+    /// Cameras reported by `scrcpy --list-cameras`.
+    pub cameras: Vec<CameraEntry>,
+    /// Capture sizes reported by `scrcpy --list-camera-sizes`.
+    pub camera_sizes: Vec<CameraSizeEntry>,
+    /// Launchable apps reported by `scrcpy --list-apps`.
+    pub apps: Vec<AppEntry>,
     pub logs: Vec<(String, String)>,
     pub running: BTreeMap<String, bool>,
     pub history: Vec<String>,
@@ -226,6 +258,13 @@ pub struct Ui {
     pub pair_code: TextEdit,
     pub command: TextEdit,
     pub background_color: TextEdit,
+    /// Free-form advanced inputs, committed on Enter (same pattern as the
+    /// background colour field).
+    pub crop: TextEdit,
+    pub window_title: TextEdit,
+    pub window_width: TextEdit,
+    pub window_height: TextEdit,
+    pub start_app: TextEdit,
     pub open_select: Option<String>,
     pub alert: Option<String>,
     pub update: Option<UpdateInfo>,
@@ -300,6 +339,17 @@ impl Default for Ui {
         let config: ScrcpyConfig = prefs.get("config").unwrap_or_else(default_config);
         let tab = SessionKind::from_mode(&config.session_mode);
         let bg_color = config.background_color.clone().unwrap_or_default();
+        let crop = config.crop.clone().unwrap_or_default();
+        let window_title = config.window_title.clone().unwrap_or_default();
+        let window_width = config
+            .window_width
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let window_height = config
+            .window_height
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let start_app = config.start_app.clone().unwrap_or_default();
         let dark = prefs.get("dark").unwrap_or(true);
         let color_mode: String = prefs
             .get("color_mode")
@@ -320,6 +370,9 @@ impl Default for Ui {
             mdns: Vec::new(),
             displays: Vec::new(),
             video_encoders: Vec::new(),
+            cameras: Vec::new(),
+            camera_sizes: Vec::new(),
+            apps: Vec::new(),
             logs: Vec::new(),
             running: BTreeMap::new(),
             history,
@@ -338,6 +391,11 @@ impl Default for Ui {
             pair_code: TextEdit::new(""),
             command: TextEdit::new(""),
             background_color: TextEdit::new(bg_color),
+            crop: TextEdit::new(crop),
+            window_title: TextEdit::new(window_title),
+            window_width: TextEdit::new(window_width),
+            window_height: TextEdit::new(window_height),
+            start_app: TextEdit::new(start_app),
             open_select: None,
             alert: None,
             update: None,
@@ -461,6 +519,47 @@ impl Ui {
         self.ip.replace_text("192.168.x.x:5555");
         self.pair_ip.replace_text("192.168.x.x:55");
         self.background_color.replace_text("");
+        self.crop.replace_text("");
+        self.window_title.replace_text("");
+        self.window_width.replace_text("");
+        self.window_height.replace_text("");
+        self.start_app.replace_text("");
+        self.cameras = vec![
+            CameraEntry {
+                id: 0,
+                facing: "back".into(),
+                size: "4096x3072".into(),
+            },
+            CameraEntry {
+                id: 1,
+                facing: "front".into(),
+                size: "2304x1728".into(),
+            },
+        ];
+        self.camera_sizes = vec![
+            CameraSizeEntry {
+                camera: Some(0),
+                size: "4096x3072".into(),
+            },
+            CameraSizeEntry {
+                camera: Some(0),
+                size: "1920x1080".into(),
+            },
+            CameraSizeEntry {
+                camera: Some(1),
+                size: "2304x1728".into(),
+            },
+        ];
+        self.apps = vec![
+            AppEntry {
+                package: "com.example.demo".into(),
+                label: "Demo".into(),
+            },
+            AppEntry {
+                package: "com.example.notes".into(),
+                label: "Notes".into(),
+            },
+        ];
     }
 
     pub fn setup(&mut self, waker: Waker) {
@@ -645,6 +744,27 @@ impl Ui {
                     ev.payload.get("encoders").cloned().unwrap_or(Value::Null),
                 ) {
                     self.video_encoders = list;
+                }
+            }
+            "camera-list" => {
+                if let Ok(list) = serde_json::from_value::<Vec<CameraEntry>>(
+                    ev.payload.get("cameras").cloned().unwrap_or(Value::Null),
+                ) {
+                    self.cameras = list;
+                }
+            }
+            "camera-size-list" => {
+                if let Ok(list) = serde_json::from_value::<Vec<CameraSizeEntry>>(
+                    ev.payload.get("sizes").cloned().unwrap_or(Value::Null),
+                ) {
+                    self.camera_sizes = list;
+                }
+            }
+            "app-list" => {
+                if let Ok(list) = serde_json::from_value::<Vec<AppEntry>>(
+                    ev.payload.get("apps").cloned().unwrap_or(Value::Null),
+                ) {
+                    self.apps = list;
                 }
             }
             "reconnect-history" => self.reconnect_history(),
@@ -1119,6 +1239,49 @@ impl Ui {
         });
     }
 
+    /// Asks scrcpy which cameras the selected device exposes, for the
+    /// `--camera-id` picker (camera mode).
+    pub fn refresh_cameras(&self) {
+        if self.fixture || self.config.device.is_empty() {
+            return;
+        }
+        let sink = self.sink.clone();
+        let device = self.config.device.clone();
+        let path = self.config.scrcpy_path.clone();
+        self.runtime.spawn(async move {
+            let value = commands::list_cameras(device, path).await;
+            sink.emit("camera-list", value);
+        });
+    }
+
+    /// Asks scrcpy which capture sizes the selected camera supports.
+    pub fn refresh_camera_sizes(&self) {
+        if self.fixture || self.config.device.is_empty() {
+            return;
+        }
+        let sink = self.sink.clone();
+        let device = self.config.device.clone();
+        let path = self.config.scrcpy_path.clone();
+        self.runtime.spawn(async move {
+            let value = commands::list_camera_sizes(device, path).await;
+            sink.emit("camera-size-list", value);
+        });
+    }
+
+    /// Asks scrcpy which apps are launchable, for `--start-app`.
+    pub fn refresh_apps(&self) {
+        if self.fixture || self.config.device.is_empty() {
+            return;
+        }
+        let sink = self.sink.clone();
+        let device = self.config.device.clone();
+        let path = self.config.scrcpy_path.clone();
+        self.runtime.spawn(async move {
+            let value = commands::list_apps(device, path).await;
+            sink.emit("app-list", value);
+        });
+    }
+
     /// Emits a `device-poll` every 5 s; the UI thread runs a single silent
     /// fetch unless a manual refresh or connect owns the busy state.
     fn start_device_poll(&self) {
@@ -1406,11 +1569,22 @@ impl Ui {
         self.config.device = serial.clone();
         self.open_select = None;
         self.save_config();
-        // Display and encoder lists are device-specific; refresh them when the
-        // selection actually changes (or the lists are still empty).
+        if changed {
+            // Inventories are device-specific; a stale list from the previous
+            // device must not leak into the pickers.
+            self.displays.clear();
+            self.video_encoders.clear();
+            self.cameras.clear();
+            self.camera_sizes.clear();
+            self.apps.clear();
+        }
         if changed || self.displays.is_empty() || self.video_encoders.is_empty() {
             self.refresh_displays();
             self.refresh_encoders();
+        }
+        if matches!(self.tab, SessionKind::Camera) && self.cameras.is_empty() {
+            self.refresh_cameras();
+            self.refresh_camera_sizes();
         }
         // Selecting an idle device must not clear the active device of another
         // device that is still running (Ctrl+Alt+Shift+C would stop recentring
@@ -1541,6 +1715,12 @@ impl Ui {
         self.config.session_mode = tab.as_str().into();
         if changed {
             self.save_config();
+        }
+        // Entering camera mode needs the camera/size inventory; it is fetched
+        // on demand when the list is still empty.
+        if matches!(tab, SessionKind::Camera) && self.cameras.is_empty() {
+            self.refresh_cameras();
+            self.refresh_camera_sizes();
         }
     }
 

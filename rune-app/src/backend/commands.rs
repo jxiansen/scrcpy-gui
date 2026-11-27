@@ -244,6 +244,144 @@ pub async fn list_video_encoders(
     }
 }
 
+/// Parses `scrcpy --list-cameras` output:
+/// `--camera-id=0    (back, 4096x3072, fps={...}, zoom-range=[1, 10])`.
+fn parse_camera_list(text: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("--camera-id=") else {
+            continue;
+        };
+        let (id, rest) = match rest.split_once(char::is_whitespace) {
+            Some((id, rest)) => (id, rest.trim()),
+            None => (rest, ""),
+        };
+        let Ok(id) = id.parse::<u32>() else { continue };
+        let inner = rest.trim_start_matches('(').trim_end_matches(')');
+        let mut parts = inner.split(',').map(str::trim);
+        let facing = parts.next().unwrap_or("").to_string();
+        let size = parts.next().unwrap_or("").to_string();
+        out.push(json!({ "id": id, "facing": facing, "size": size }));
+    }
+    out
+}
+
+/// Parses `scrcpy --list-camera-sizes`. Normal capture sizes are grouped by
+/// camera; the high-speed subsection is skipped (it needs --camera-high-speed).
+fn parse_camera_sizes(text: &str) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut camera: Option<u32> = None;
+    let mut high_speed = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("--camera-id=") {
+            camera = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u32>().ok());
+            high_speed = false;
+            continue;
+        }
+        if trimmed.starts_with("High speed capture") {
+            high_speed = true;
+            continue;
+        }
+        if high_speed {
+            continue;
+        }
+        let Some(size) = trimmed.strip_prefix("- ") else {
+            continue;
+        };
+        let size = size.trim();
+        if sanitize_camera_size(size).is_some()
+            && !out.iter().any(|entry| {
+                entry.get("camera").and_then(serde_json::Value::as_u64) == camera.map(u64::from)
+                    && entry.get("size").and_then(serde_json::Value::as_str) == Some(size)
+            })
+        {
+            out.push(json!({ "camera": camera, "size": size }));
+        }
+    }
+    out
+}
+
+/// Parses `scrcpy --list-apps` lines: ` - <label>    <package>`.
+fn parse_app_list(text: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("- ") else {
+            continue;
+        };
+        let mut tokens: Vec<&str> = rest.split_whitespace().collect();
+        if tokens.len() < 2 {
+            continue;
+        }
+        let package = tokens.pop().unwrap_or("");
+        if package.is_empty()
+            || !package
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_'))
+        {
+            continue;
+        }
+        out.push(json!({ "package": package, "label": tokens.join(" ") }));
+    }
+    out
+}
+
+async fn run_scrcpy_listing(
+    device: &str,
+    custom_path: Option<String>,
+    flag: &str,
+) -> Result<String, String> {
+    let exe_path = get_binary_path("scrcpy", custom_path);
+    let mut command = create_command(&exe_path);
+    command.arg("-s").arg(device).arg(flag);
+    match timeout(SCRCPY_QUERY_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => Ok(format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err(format!("{} timed out", flag)),
+    }
+}
+
+/// Lists the device's cameras for `--camera-id` selection.
+pub async fn list_cameras(device: String, custom_path: Option<String>) -> serde_json::Value {
+    match run_scrcpy_listing(&device, custom_path, "--list-cameras").await {
+        Ok(text) => {
+            let cameras = parse_camera_list(&text);
+            json!({ "success": !cameras.is_empty(), "cameras": cameras })
+        }
+        Err(message) => json!({ "success": false, "cameras": [], "message": message }),
+    }
+}
+
+/// Lists the device's camera capture sizes for `--camera-size` selection.
+pub async fn list_camera_sizes(device: String, custom_path: Option<String>) -> serde_json::Value {
+    match run_scrcpy_listing(&device, custom_path, "--list-camera-sizes").await {
+        Ok(text) => {
+            let sizes = parse_camera_sizes(&text);
+            json!({ "success": !sizes.is_empty(), "sizes": sizes })
+        }
+        Err(message) => json!({ "success": false, "sizes": [], "message": message }),
+    }
+}
+
+/// Lists the device's launchable apps for `--start-app` selection.
+pub async fn list_apps(device: String, custom_path: Option<String>) -> serde_json::Value {
+    match run_scrcpy_listing(&device, custom_path, "--list-apps").await {
+        Ok(text) => {
+            let apps = parse_app_list(&text);
+            json!({ "success": !apps.is_empty(), "apps": apps })
+        }
+        Err(message) => json!({ "success": false, "apps": [], "message": message }),
+    }
+}
+
 pub async fn check_scrcpy(custom_path: Option<String>) -> serde_json::Value {
     let exe_path = get_binary_path("scrcpy", custom_path);
 
@@ -1211,6 +1349,47 @@ pub struct ScrcpyConfig {
     /// Gamepad forwarding mode (`--gamepad`): "uhid" or "aoa". None/"disabled"
     /// keeps scrcpy's default (no gamepad).
     pub gamepad: Option<String>,
+    // Audio.
+    /// `--audio-source`: output, playback, mic, mic-unprocessed, mic-camcorder,
+    /// mic-voice-recognition or mic-voice-communication.
+    pub audio_source: Option<String>,
+    /// `--audio-bit-rate`, e.g. "128K".
+    pub audio_bit_rate: Option<String>,
+    /// `--audio-buffer` in milliseconds.
+    pub audio_buffer: Option<u32>,
+    // Device behaviour.
+    pub show_touches: Option<bool>,
+    pub disable_screensaver: Option<bool>,
+    /// `--screen-off-timeout` in seconds while the session runs.
+    pub screen_off_timeout: Option<u32>,
+    pub power_off_on_close: Option<bool>,
+    pub print_fps: Option<bool>,
+    // Video / window.
+    /// `--crop=width:height:x:y`.
+    pub crop: Option<String>,
+    pub capture_orientation: Option<String>,
+    pub display_orientation: Option<String>,
+    pub record_orientation: Option<String>,
+    /// `--angle` in degrees (0/90/180/270).
+    pub angle: Option<String>,
+    pub window_title: Option<String>,
+    pub window_width: Option<u32>,
+    pub window_height: Option<u32>,
+    /// `--render-fit`: letterbox, stretched or unscaled.
+    pub render_fit: Option<String>,
+    // Virtual display.
+    pub no_vd_system_decorations: Option<bool>,
+    /// `--display-ime-policy`: local, fallback or hide.
+    pub display_ime_policy: Option<String>,
+    // Recording extras.
+    pub no_window: Option<bool>,
+    pub no_video_playback: Option<bool>,
+    pub no_audio_playback: Option<bool>,
+    // Camera / app.
+    /// Explicit `--camera-size=WxH`, overriding the resolution mapping.
+    pub camera_size: Option<String>,
+    /// `--start-app`: exact package, `?prefix` or `+package`.
+    pub start_app: Option<String>,
 }
 
 const HWDEC_VALUES: &[&str] = &["disabled", "vaapi", "d3d11va", "videotoolbox"];
@@ -1245,6 +1424,123 @@ fn resolve_gamepad_mode(config: &ScrcpyConfig) -> Option<&'static str> {
     ["uhid", "aoa"]
         .into_iter()
         .find(|mode| requested.eq_ignore_ascii_case(mode))
+}
+
+const AUDIO_SOURCES: &[&str] = &[
+    "output",
+    "playback",
+    "mic",
+    "mic-unprocessed",
+    "mic-camcorder",
+    "mic-voice-recognition",
+    "mic-voice-communication",
+];
+const RENDER_FITS: &[&str] = &["letterbox", "stretched", "unscaled"];
+const IME_POLICIES: &[&str] = &["local", "fallback", "hide"];
+const ORIENTATION_VALUES: &[&str] = &[
+    "0", "90", "180", "270", "flip0", "flip90", "flip180", "flip270",
+];
+const RECORD_ORIENTATION_VALUES: &[&str] = &["0", "90", "180", "270"];
+const ANGLE_VALUES: &[&str] = &["0", "90", "180", "270"];
+
+fn pick_allowlisted(value: Option<&str>, allowed: &'static [&'static str]) -> Option<&'static str> {
+    let requested = value?.trim();
+    allowed
+        .iter()
+        .find(|candidate| requested.eq_ignore_ascii_case(candidate))
+        .copied()
+}
+
+fn resolve_audio_source(config: &ScrcpyConfig) -> Option<&'static str> {
+    pick_allowlisted(config.audio_source.as_deref(), AUDIO_SOURCES)
+}
+
+fn resolve_render_fit(config: &ScrcpyConfig) -> Option<&'static str> {
+    pick_allowlisted(config.render_fit.as_deref(), RENDER_FITS)
+}
+
+fn resolve_ime_policy(config: &ScrcpyConfig) -> Option<&'static str> {
+    pick_allowlisted(config.display_ime_policy.as_deref(), IME_POLICIES)
+}
+
+fn resolve_orientation(
+    value: Option<&str>,
+    allowed: &'static [&'static str],
+) -> Option<&'static str> {
+    // "0" is the default; passing it explicitly would add a redundant flag.
+    pick_allowlisted(value, allowed).filter(|value| *value != "0")
+}
+
+fn resolve_angle(config: &ScrcpyConfig) -> Option<&'static str> {
+    pick_allowlisted(config.angle.as_deref(), ANGLE_VALUES).filter(|value| *value != "0")
+}
+
+/// `--audio-bit-rate` accepts `<digits>` with an optional K/M suffix.
+fn sanitize_audio_bit_rate(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let (digits, has_suffix) = match trimmed.chars().last() {
+        Some(last) if last.is_ascii_alphabetic() => (&trimmed[..trimmed.len() - 1], true),
+        _ => (trimmed, false),
+    };
+    (!digits.is_empty()
+        && digits.len() <= 9
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && (!has_suffix
+            || trimmed
+                .chars()
+                .last()
+                .is_some_and(|c| c.eq_ignore_ascii_case(&'k') || c.eq_ignore_ascii_case(&'m'))))
+    .then_some(trimmed)
+}
+
+/// `--crop=width:height:x:y`.
+fn sanitize_crop(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    (parts.len() == 4
+        && parts.iter().all(|part| {
+            !part.is_empty() && part.len() <= 5 && part.chars().all(|c| c.is_ascii_digit())
+        }))
+    .then_some(trimmed)
+}
+
+/// A window title must be printable, non-empty and bounded.
+fn sanitize_window_title(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty() && trimmed.len() <= 128 && !trimmed.chars().any(char::is_control))
+        .then_some(trimmed)
+}
+
+/// `--start-app` takes an exact package, a `?prefix` or `+package` (optionally
+/// both). The package charset is conservative so the value cannot grow into an
+/// extra argument.
+fn sanitize_start_app(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let prefix_len = trimmed
+        .chars()
+        .take_while(|c| *c == '?' || *c == '+')
+        .count();
+    let package = &trimmed[prefix_len..];
+    (!package.is_empty()
+        && package.len() <= 200
+        && prefix_len <= 2
+        && package
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    .then_some(trimmed)
+}
+
+/// Explicit camera capture size (`--camera-size=WxH`).
+fn sanitize_camera_size(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    let (width, height) = trimmed.split_once('x')?;
+    (!width.is_empty()
+        && !height.is_empty()
+        && width.len() <= 5
+        && height.len() <= 5
+        && width.chars().all(|c| c.is_ascii_digit())
+        && height.chars().all(|c| c.is_ascii_digit()))
+    .then_some(trimmed)
 }
 
 /// The SDL driver names scrcpy accepts for `--render-driver`. Like hwdec, the
@@ -1815,6 +2111,19 @@ fn build_scrcpy_args(
             if let Some(codec) = resolve_audio_codec_flag(config, audio_codec_override) {
                 args.push(format!("--audio-codec={}", codec));
             }
+            if let Some(source) = resolve_audio_source(config) {
+                args.push(format!("--audio-source={}", source));
+            }
+            if let Some(rate) = config
+                .audio_bit_rate
+                .as_deref()
+                .and_then(sanitize_audio_bit_rate)
+            {
+                args.push(format!("--audio-bit-rate={}", rate));
+            }
+            if let Some(buffer) = config.audio_buffer.filter(|ms| *ms > 0) {
+                args.push(format!("--audio-buffer={}", buffer));
+            }
         }
         if let Some(aot) = config.always_on_top {
             if aot {
@@ -1830,6 +2139,26 @@ fn build_scrcpy_args(
             if bl {
                 args.push("--window-borderless".to_string());
             }
+        }
+
+        if let Some(title) = config
+            .window_title
+            .as_deref()
+            .and_then(sanitize_window_title)
+        {
+            args.push(format!("--window-title={}", title));
+        }
+        if let Some(width) = config.window_width.filter(|value| *value >= 100) {
+            args.push(format!("--window-width={}", width));
+        }
+        if let Some(height) = config.window_height.filter(|value| *value >= 100) {
+            args.push(format!("--window-height={}", height));
+        }
+        if let Some(fit) = resolve_render_fit(config) {
+            args.push(format!("--render-fit={}", fit));
+        }
+        if let Some(crop) = config.crop.as_deref().and_then(sanitize_crop) {
+            args.push(format!("--crop={}", crop));
         }
 
         // Mirror a secondary display. `--display-id` belongs to the display
@@ -1880,11 +2209,29 @@ fn build_scrcpy_args(
             }
         }
 
-        if let Some(rot) = &config.rotation {
-            if rot != "0" {
-                args.push("--orientation".to_string());
-                args.push(rot.clone());
-            }
+        // `rotation` is the legacy `--orientation` (display + record). New
+        // configs set display_orientation explicitly; both map to
+        // --display-orientation so record_orientation can differ.
+        let display_orientation = config
+            .display_orientation
+            .as_deref()
+            .or(config.rotation.as_deref());
+        if let Some(value) = resolve_orientation(display_orientation, ORIENTATION_VALUES) {
+            args.push(format!("--display-orientation={}", value));
+        }
+        if let Some(value) =
+            resolve_orientation(config.capture_orientation.as_deref(), ORIENTATION_VALUES)
+        {
+            args.push(format!("--capture-orientation={}", value));
+        }
+        if let Some(value) = resolve_orientation(
+            config.record_orientation.as_deref(),
+            RECORD_ORIENTATION_VALUES,
+        ) {
+            args.push(format!("--record-orientation={}", value));
+        }
+        if let Some(value) = resolve_angle(config) {
+            args.push(format!("--angle={}", value));
         }
 
         let can_control = config.session_mode != "camera";
@@ -1907,6 +2254,22 @@ fn build_scrcpy_args(
             }
         }
 
+        if let Some(true) = config.show_touches {
+            args.push("--show-touches".to_string());
+        }
+        if let Some(true) = config.disable_screensaver {
+            args.push("--disable-screensaver".to_string());
+        }
+        if let Some(timeout) = config.screen_off_timeout.filter(|seconds| *seconds > 0) {
+            args.push(format!("--screen-off-timeout={}", timeout));
+        }
+        if let Some(true) = config.power_off_on_close {
+            args.push("--power-off-on-close".to_string());
+        }
+        if let Some(true) = config.print_fps {
+            args.push("--print-fps".to_string());
+        }
+
         if config.session_mode == "camera" {
             args.push("--video-source=camera".to_string());
             // Only a numeric camera id is a real id. Older configs stored the
@@ -1923,8 +2286,11 @@ fn build_scrcpy_args(
                 args.push(format!("--camera-facing={}", facing));
             }
 
-            // Resolution logic: Map res (e.g., "1920") to standard camera sizes (e.g., "1920x1080")
-            if let Some(res) = &config.res {
+            // A size picked from `--list-camera-sizes` wins; otherwise map the
+            // profile resolution to a standard camera size.
+            if let Some(size) = config.camera_size.as_deref().and_then(sanitize_camera_size) {
+                args.push(format!("--camera-size={}", size));
+            } else if let Some(res) = &config.res {
                 if res != "0" {
                     let camera_size = match res.as_str() {
                         "3840" => "3840x2160",
@@ -1972,6 +2338,12 @@ fn build_scrcpy_args(
             let dpi = config.vd_dpi.unwrap_or(420);
             args.push(format!("--new-display={}x{}/{}", w, h, dpi));
             args.push("--video-buffer=100".to_string());
+            if let Some(true) = config.no_vd_system_decorations {
+                args.push("--no-vd-system-decorations".to_string());
+            }
+            if let Some(policy) = resolve_ime_policy(config) {
+                args.push(format!("--display-ime-policy={}", policy));
+            }
             // v4: flex display (resize virtual display with window)
             if let Some(true) = config.flex_display {
                 args.push("--flex-display".to_string());
@@ -2027,6 +2399,24 @@ fn build_scrcpy_args(
                     args.push(format!("--record-format={}", format));
                 }
             }
+        }
+
+        // `--no-window` is only meaningful together with `--record`: without
+        // it the session would run invisible with nothing to show for it.
+        if config.record.unwrap_or(false) {
+            if let Some(true) = config.no_window {
+                args.push("--no-window".to_string());
+            }
+        }
+        if let Some(true) = config.no_video_playback {
+            args.push("--no-video-playback".to_string());
+        }
+        if let Some(true) = config.no_audio_playback {
+            args.push("--no-audio-playback".to_string());
+        }
+
+        if let Some(app) = config.start_app.as_deref().and_then(sanitize_start_app) {
+            args.push(format!("--start-app={}", app));
         }
 
         // v4: background color (all modes)
@@ -2985,6 +3375,30 @@ mod tests {
             record_no_playback: None,
             no_control: None,
             gamepad: None,
+            audio_source: None,
+            audio_bit_rate: None,
+            audio_buffer: None,
+            show_touches: None,
+            disable_screensaver: None,
+            screen_off_timeout: None,
+            power_off_on_close: None,
+            print_fps: None,
+            crop: None,
+            capture_orientation: None,
+            display_orientation: None,
+            record_orientation: None,
+            angle: None,
+            window_title: None,
+            window_width: None,
+            window_height: None,
+            render_fit: None,
+            no_vd_system_decorations: None,
+            display_ime_policy: None,
+            no_window: None,
+            no_video_playback: None,
+            no_audio_playback: None,
+            camera_size: None,
+            start_app: None,
         }
     }
 
@@ -3556,6 +3970,171 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
         assert_eq!(encoders[0]["hw"], true);
         assert_eq!(encoders[1]["hw"], false);
         assert_eq!(encoders[2]["codec"], "h265");
+    }
+
+    #[test]
+    fn test_parse_camera_list_and_sizes() {
+        let cameras = "\
+[server] INFO: List of cameras:
+    --camera-id=0    (back, 4096x3072, fps={10, 15, 20, 24, 30}, zoom-range=[1, 10])
+    --camera-id=1    (front, 2304x1728, fps={10, 15, 30}, zoom-range=[1, 10])
+";
+        let parsed = parse_camera_list(cameras);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0]["id"], 0);
+        assert_eq!(parsed[0]["facing"], "back");
+        assert_eq!(parsed[0]["size"], "4096x3072");
+        assert_eq!(parsed[1]["facing"], "front");
+
+        let sizes = "\
+    --camera-id=0    (back, 4096x3072, fps={10, 30})
+        - 4096x3072
+        - 1920x1080
+      High speed capture (--camera-high-speed):
+        - 1280x720
+    --camera-id=1    (front, 2304x1728)
+        - 2304x1728
+";
+        let parsed = parse_camera_sizes(sizes);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0]["camera"], 0);
+        assert_eq!(parsed[0]["size"], "4096x3072");
+        assert_eq!(parsed[2]["camera"], 1);
+        assert_eq!(parsed[2]["size"], "2304x1728");
+    }
+
+    #[test]
+    fn test_parse_app_list() {
+        let text = "\
+[server] INFO: List of apps:
+ - 酷安                             com.coolapk.market
+ - 高德地图                         com.autonavi.minimap
+ - bad package/with/slash
+";
+        let apps = parse_app_list(text);
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0]["package"], "com.coolapk.market");
+        assert_eq!(apps[0]["label"], "酷安");
+        assert_eq!(apps[1]["label"], "高德地图");
+    }
+
+    #[test]
+    fn test_audio_source_and_bitrate() {
+        let mut config = base_config("mirror");
+        config.audio_source = Some("MIC".to_string());
+        config.audio_bit_rate = Some("96K".to_string());
+        config.audio_buffer = Some(50);
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--audio-source=mic".to_string()));
+        assert!(args.contains(&"--audio-bit-rate=96K".to_string()));
+        assert!(args.contains(&"--audio-buffer=50".to_string()));
+
+        config.audio_source = Some("--no-audio".to_string());
+        config.audio_bit_rate = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--audio-source")));
+        assert!(!args.iter().any(|a| a.starts_with("--audio-bit-rate")));
+    }
+
+    #[test]
+    fn test_crop_and_window_options() {
+        let mut config = base_config("mirror");
+        config.crop = Some("1080:1920:0:100".to_string());
+        config.window_title = Some("Phone".to_string());
+        config.window_width = Some(800);
+        config.window_height = Some(600);
+        config.render_fit = Some("stretched".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--crop=1080:1920:0:100".to_string()));
+        assert!(args.contains(&"--window-title=Phone".to_string()));
+        assert!(args.contains(&"--window-width=800".to_string()));
+        assert!(args.contains(&"--window-height=600".to_string()));
+        assert!(args.contains(&"--render-fit=stretched".to_string()));
+
+        config.crop = Some("1:2:3".to_string());
+        config.window_width = Some(10);
+        config.render_fit = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--crop")));
+        assert!(!args.iter().any(|a| a.starts_with("--window-width")));
+        assert!(!args.iter().any(|a| a.starts_with("--render-fit")));
+    }
+
+    #[test]
+    fn test_device_behaviour_flags() {
+        let mut config = base_config("mirror");
+        config.show_touches = Some(true);
+        config.disable_screensaver = Some(true);
+        config.screen_off_timeout = Some(120);
+        config.power_off_on_close = Some(true);
+        config.print_fps = Some(true);
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--show-touches".to_string()));
+        assert!(args.contains(&"--disable-screensaver".to_string()));
+        assert!(args.contains(&"--screen-off-timeout=120".to_string()));
+        assert!(args.contains(&"--power-off-on-close".to_string()));
+        assert!(args.contains(&"--print-fps".to_string()));
+    }
+
+    #[test]
+    fn test_orientation_and_angle() {
+        let mut config = base_config("mirror");
+        config.display_orientation = Some("flip90".to_string());
+        config.capture_orientation = Some("270".to_string());
+        config.record_orientation = Some("180".to_string());
+        config.angle = Some("90".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--display-orientation=flip90".to_string()));
+        assert!(args.contains(&"--capture-orientation=270".to_string()));
+        assert!(args.contains(&"--record-orientation=180".to_string()));
+        assert!(args.contains(&"--angle=90".to_string()));
+
+        // The legacy `rotation` field still maps to display orientation, and
+        // "0" stays the default (no flag).
+        let mut legacy = base_config("mirror");
+        legacy.rotation = Some("180".to_string());
+        let args = build_scrcpy_args(&legacy, None, None);
+        assert!(args.contains(&"--display-orientation=180".to_string()));
+
+        let mut zero = base_config("mirror");
+        zero.display_orientation = Some("0".to_string());
+        let args = build_scrcpy_args(&zero, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--display-orientation")));
+    }
+
+    #[test]
+    fn test_virtual_display_and_recording_extras() {
+        let mut config = base_config("desktop");
+        config.no_vd_system_decorations = Some(true);
+        config.display_ime_policy = Some("hide".to_string());
+        config.record = Some(true);
+        config.record_path = Some(std::env::temp_dir().to_string_lossy().to_string());
+        config.no_window = Some(true);
+        config.no_video_playback = Some(true);
+        config.no_audio_playback = Some(true);
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--no-vd-system-decorations".to_string()));
+        assert!(args.contains(&"--display-ime-policy=hide".to_string()));
+        assert!(args.contains(&"--no-window".to_string()));
+        assert!(args.contains(&"--no-video-playback".to_string()));
+        assert!(args.contains(&"--no-audio-playback".to_string()));
+    }
+
+    #[test]
+    fn test_camera_size_and_start_app() {
+        let mut config = base_config("camera");
+        config.camera_size = Some("1280x720".to_string());
+        config.start_app = Some("?+com.example.app".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--camera-size=1280x720".to_string()));
+        assert!(args.contains(&"--start-app=?+com.example.app".to_string()));
+
+        config.camera_size = Some("--no-audio".to_string());
+        config.start_app = Some("bad app".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--start-app")));
+        // The invalid camera size falls back to the profile mapping.
+        assert!(args.iter().any(|a| a.starts_with("--camera-size=")));
     }
 
     #[test]

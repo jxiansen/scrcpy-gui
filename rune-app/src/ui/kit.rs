@@ -4,7 +4,7 @@
 //! the OpenCode theme. The console, file drop zone and scrcpy-specific icons stay
 //! custom because the kit has no equivalent.
 
-use rune::{Cx, El, LiveRegion, ScrollSpec, col, el, row, text};
+use rune::{Cx, El, LiveRegion, ScrollSpec, TextEdit, col, el, row, text};
 use rune_kit::glyphs;
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, Field, IconButton, IconButtonVariant, Keybind, Kit,
@@ -22,11 +22,9 @@ use crate::ui::state::{SessionKind, Transport};
 
 const FPS: &[&str] = &["Auto", "30", "60", "90", "120"];
 const RES: &[&str] = &["0", "3840", "2560", "1920", "1600", "1280", "1024", "800"];
-const ROT: &[&str] = &["0", "270", "90", "180"];
 const CODEC: &[&str] = &["h264", "h265", "av1", "vp8", "vp9"];
 const ASPECT: &[&str] = &["0", "16:9", "4:3"];
 const AUDIO_CODEC: &[&str] = &["auto", "opus", "aac", "flac", "raw"];
-const LENSES: &[&str] = &["Auto Select", "Back", "Front", "External"];
 const PRESETS: &[&str] = &["Custom", "1080p", "1440p", "4K", "21:9"];
 const LOCALES: &[&str] = &["en", "fr", "pt-BR", "zh-CN", "zh-TW", "ru", "id", "ar"];
 /// `--gamepad` modes; "disabled" means no flag is passed.
@@ -34,6 +32,23 @@ const GAMEPAD_OPTIONS: &[&str] = &["disabled", "uhid", "aoa"];
 /// `--record-format` containers exposed in the GUI. Video containers only:
 /// the audio-only ones are left to the CLI.
 const RECORD_FORMAT_OPTIONS: &[&str] = &["mkv", "mp4"];
+const AUDIO_SOURCE_OPTIONS: &[&str] = &[
+    "output",
+    "playback",
+    "mic",
+    "mic-unprocessed",
+    "mic-camcorder",
+    "mic-voice-recognition",
+    "mic-voice-communication",
+];
+const AUDIO_BIT_RATE_OPTIONS: &[&str] = &["default", "64K", "96K", "128K", "192K", "256K"];
+const ORIENTATION_OPTIONS: &[&str] = &[
+    "default", "0", "90", "180", "270", "flip0", "flip90", "flip180", "flip270",
+];
+const RECORD_ORIENTATION_OPTIONS: &[&str] = &["default", "0", "90", "180", "270"];
+const ANGLE_OPTIONS: &[&str] = &["default", "0", "90", "180", "270"];
+const RENDER_FIT_OPTIONS: &[&str] = &["default", "letterbox", "stretched", "unscaled"];
+const IME_OPTIONS: &[&str] = &["default", "local", "fallback", "hide"];
 
 /// `Auto` plus the scrcpy `--render-driver` values legal on this OS, mirroring
 /// the backend allowlist. `swiftshader`/`native` are not SDL driver names; the
@@ -113,6 +128,31 @@ fn display_option(locale: &str, key: &str, value: &str) -> String {
         ("gamepad", "uhid") => "controlPanel.gamepadUhid",
         ("gamepad", "aoa") => "controlPanel.gamepadAoa",
         ("record_format", _) => return value.to_uppercase(),
+        ("audio_source", "output") => "sessionBehavior.audioSourceOutput",
+        ("audio_source", "playback") => "sessionBehavior.audioSourcePlayback",
+        ("audio_source", "mic") => "sessionBehavior.audioSourceMic",
+        ("audio_source", "mic-unprocessed") => "sessionBehavior.audioSourceMicUnprocessed",
+        ("audio_source", "mic-camcorder") => "sessionBehavior.audioSourceMicCamcorder",
+        ("audio_source", "mic-voice-recognition") => {
+            "sessionBehavior.audioSourceMicVoiceRecognition"
+        }
+        ("audio_source", "mic-voice-communication") => {
+            "sessionBehavior.audioSourceMicVoiceCommunication"
+        }
+        ("audio_bit_rate", "default") => "sessionBehavior.audioBitRateDefault",
+        (
+            "display_orientation" | "capture_orientation" | "record_orientation" | "angle",
+            "default",
+        ) => "controlPanel.defaultValue",
+        ("render_fit", "letterbox") => "controlPanel.renderFitLetterbox",
+        ("render_fit", "stretched") => "controlPanel.renderFitStretched",
+        ("render_fit", "unscaled") => "controlPanel.renderFitUnscaled",
+        ("display_ime_policy", "local") => "controlPanel.imeLocal",
+        ("display_ime_policy", "fallback") => "controlPanel.imeFallback",
+        ("display_ime_policy", "hide") => "controlPanel.imeHide",
+        ("camera_size", "auto") => "controlPanel.cameraSizeAuto",
+        ("start_app", "none") => "controlPanel.appNone",
+        ("angle", _) => return format!("{value}°"),
         ("rotation", _) => return format!("{value}°"),
         _ => return value.to_string(),
     };
@@ -192,6 +232,43 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
         }
         "res" => s.config.res = Some(v.into()),
         "rotation" => s.config.rotation = Some(v.into()),
+        "display_orientation" => {
+            s.config.display_orientation = if v == "default" { None } else { Some(v.into()) };
+            // The legacy `rotation` value is superseded by this explicit
+            // control; clear it so "default" really means default.
+            s.config.rotation = None;
+        }
+        "capture_orientation" => {
+            s.config.capture_orientation = if v == "default" { None } else { Some(v.into()) };
+        }
+        "record_orientation" => {
+            s.config.record_orientation = if v == "default" { None } else { Some(v.into()) };
+        }
+        "angle" => {
+            s.config.angle = if v == "default" { None } else { Some(v.into()) };
+        }
+        "render_fit" => {
+            s.config.render_fit = if v == "default" { None } else { Some(v.into()) };
+        }
+        "display_ime_policy" => {
+            s.config.display_ime_policy = if v == "default" { None } else { Some(v.into()) };
+        }
+        "camera_size" => {
+            s.config.camera_size = if v == "auto" { None } else { Some(v.into()) };
+        }
+        "audio_source" => s.config.audio_source = Some(v.into()),
+        "audio_bit_rate" => {
+            s.config.audio_bit_rate = if v == "default" { None } else { Some(v.into()) };
+        }
+        "start_app" => {
+            let value = if v == "none" {
+                String::new()
+            } else {
+                v.to_string()
+            };
+            s.start_app.replace_text(value.clone());
+            s.config.start_app = if value.is_empty() { None } else { Some(value) };
+        }
         "renderer" => {
             s.config.render_driver = if v == "Auto" { None } else { Some(v.into()) };
         }
@@ -212,7 +289,13 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
             };
         }
         "record_format" => s.config.record_format = Some(v.into()),
-        "lens" => write_lens_choice(&mut s.config, v),
+        "lens" => {
+            write_lens_choice(&mut s.config, v);
+            // A capture size is valid for one camera only; drop the old pick
+            // and re-list for the new camera.
+            s.config.camera_size = None;
+            s.refresh_camera_sizes();
+        }
         "preset" => match v {
             "1080p" => {
                 s.config.vd_width = Some(1920);
@@ -585,6 +668,84 @@ fn record_time_limit_field(s: &Ui, k: &Kit) -> El {
     )
 }
 
+fn audio_buffer_field(s: &Ui, k: &Kit) -> El {
+    let value = s.config.audio_buffer.unwrap_or(0) as f32;
+    let slider = Slider::new("audio_buffer", value)
+        .range(0.0..=500.0)
+        .step(10.0)
+        .label(tr(s, "sessionBehavior.audioBuffer"))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(|s: &mut Ui, v, done| {
+            let milliseconds = v.round() as u32;
+            s.config.audio_buffer = (milliseconds > 0).then_some(milliseconds);
+            if done {
+                s.save_config();
+            }
+        })
+        .build(k);
+    let value_text = if value <= 0.0 {
+        tr(s, "sessionBehavior.audioBufferDefault").to_string()
+    } else {
+        format!("{} ms", value as u32)
+    };
+    labeled_slider(k, tr(s, "sessionBehavior.audioBuffer"), value_text, slider)
+}
+
+fn screen_off_timeout_field(s: &Ui, k: &Kit) -> El {
+    let value = s.config.screen_off_timeout.unwrap_or(0) as f32;
+    let slider = Slider::new("screen_off_timeout", value)
+        .range(0.0..=3600.0)
+        .step(30.0)
+        .label(tr(s, "sessionBehavior.screenOffTimeout"))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(|s: &mut Ui, v, done| {
+            let seconds = v.round() as u32;
+            s.config.screen_off_timeout = (seconds > 0).then_some(seconds);
+            if done {
+                s.save_config();
+            }
+        })
+        .build(k);
+    let value_text = if value <= 0.0 {
+        tr(s, "sessionBehavior.screenOffTimeoutDefault").to_string()
+    } else {
+        format!("{} s", value as u32)
+    };
+    labeled_slider(
+        k,
+        tr(s, "sessionBehavior.screenOffTimeout"),
+        value_text,
+        slider,
+    )
+}
+
+fn start_app_picker(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut raw = vec!["none".to_string()];
+    let mut labels = vec![tr(s, "controlPanel.appNone").to_string()];
+    for app in &s.apps {
+        raw.push(app.package.clone());
+        labels.push(if app.label.is_empty() {
+            app.package.clone()
+        } else {
+            format!("{} · {}", app.label, app.package)
+        });
+    }
+    let current = s.config.start_app.clone().unwrap_or_else(|| "none".into());
+    select_panel(
+        s,
+        k,
+        layer,
+        "start_app",
+        &labels,
+        &raw,
+        &current,
+        tr(s, "sessionBehavior.startAppPick"),
+        260.0,
+    )
+}
+
 fn zoom_field(s: &Ui, k: &Kit) -> El {
     let value = s.config.camera_zoom.unwrap_or(1.0);
     let slider = Slider::new("zoom", value)
@@ -670,14 +831,10 @@ fn essential_fields(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
             )),
         ],
         SessionKind::Camera => vec![
-            cell(select_field(
-                s,
+            cell(field(
+                tr(s, "controlPanel.cameraDevice"),
+                lens_select(s, k, layer),
                 k,
-                layer,
-                "lens",
-                LENSES,
-                &lens_current(&s.config),
-                "controlPanel.cameraDevice",
             )),
             cell(select_field(
                 s,
@@ -811,6 +968,90 @@ fn video_encoder_select(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
     )
 }
 
+/// The camera picker: facing labels plus the real ids from `--list-cameras`.
+/// Raw values stay compatible with `lens_choice` (names or numeric ids).
+fn lens_select(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut raw = vec![
+        "Auto Select".to_string(),
+        "Back".to_string(),
+        "Front".to_string(),
+        "External".to_string(),
+    ];
+    let mut labels = vec![
+        tr(s, "controlPanel.autoSelect").to_string(),
+        tr(s, "controlPanel.facingBack").to_string(),
+        tr(s, "controlPanel.facingFront").to_string(),
+        tr(s, "controlPanel.facingExternal").to_string(),
+    ];
+    for camera in &s.cameras {
+        let id = camera.id.to_string();
+        if raw.iter().any(|value| value == &id) {
+            continue;
+        }
+        raw.push(id);
+        let facing = if camera.facing.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", camera.facing)
+        };
+        let size = if camera.size.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", camera.size)
+        };
+        labels.push(format!("#{}{}{}", camera.id, facing, size));
+    }
+    let current = lens_current(&s.config);
+    select_panel(
+        s,
+        k,
+        layer,
+        "lens",
+        &labels,
+        &raw,
+        &current,
+        tr(s, "controlPanel.cameraDevice"),
+        SELECT_W,
+    )
+}
+
+/// The `--camera-size` picker: "auto" plus the sizes reported for the selected
+/// camera (all cameras when none is pinned).
+fn camera_size_select(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut raw = vec!["auto".to_string()];
+    let mut labels = vec![tr(s, "controlPanel.cameraSizeAuto").to_string()];
+    let selected_camera = s
+        .config
+        .camera_id
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok());
+    for entry in &s.camera_sizes {
+        if selected_camera.is_some() && entry.camera.is_some() && entry.camera != selected_camera {
+            continue;
+        }
+        if !raw.iter().any(|value| value == &entry.size) {
+            raw.push(entry.size.clone());
+            labels.push(entry.size.clone());
+        }
+    }
+    let current = s
+        .config
+        .camera_size
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
+    select_panel(
+        s,
+        k,
+        layer,
+        "camera_size",
+        &labels,
+        &raw,
+        &current,
+        tr(s, "controlPanel.cameraSize"),
+        SELECT_W,
+    )
+}
+
 fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     let mut fields = Vec::new();
     if matches!(s.tab, SessionKind::Desktop) {
@@ -834,15 +1075,75 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
             k,
         )));
     }
+    // The legacy `rotation` config still feeds `--display-orientation`; the
+    // UI now edits the explicit orientation flags.
     fields.push(cell(select_field(
         s,
         k,
         layer,
-        "rotation",
-        ROT,
-        s.config.rotation.as_deref().unwrap_or("0"),
-        "controlPanel.rotation",
+        "display_orientation",
+        ORIENTATION_OPTIONS,
+        s.config
+            .display_orientation
+            .as_deref()
+            .or(s.config.rotation.as_deref())
+            .unwrap_or("default"),
+        "controlPanel.displayOrientation",
     )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "capture_orientation",
+        ORIENTATION_OPTIONS,
+        s.config.capture_orientation.as_deref().unwrap_or("default"),
+        "controlPanel.captureOrientation",
+    )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "record_orientation",
+        RECORD_ORIENTATION_OPTIONS,
+        s.config.record_orientation.as_deref().unwrap_or("default"),
+        "controlPanel.recordOrientation",
+    )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "angle",
+        ANGLE_OPTIONS,
+        s.config.angle.as_deref().unwrap_or("default"),
+        "controlPanel.angle",
+    )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "render_fit",
+        RENDER_FIT_OPTIONS,
+        s.config.render_fit.as_deref().unwrap_or("default"),
+        "controlPanel.renderFit",
+    )));
+    if matches!(s.tab, SessionKind::Desktop) {
+        fields.push(cell(select_field(
+            s,
+            k,
+            layer,
+            "display_ime_policy",
+            IME_OPTIONS,
+            s.config.display_ime_policy.as_deref().unwrap_or("default"),
+            "controlPanel.displayImePolicy",
+        )));
+    }
+    if matches!(s.tab, SessionKind::Camera) {
+        fields.push(cell(field(
+            tr(s, "controlPanel.cameraSize"),
+            camera_size_select(s, k, layer),
+            k,
+        )));
+    }
     fields.push(cell(select_field(
         s,
         k,
@@ -932,6 +1233,116 @@ fn advanced_switches(s: &Ui, k: &Kit) -> El {
     row().w_full().gap(16.0).flex_wrap().children(cells)
 }
 
+/// Free-form advanced input committed on Enter. The field edits a `TextEdit`
+/// buffer; `on_submit` validates and persists (or restores the stored value).
+fn advanced_text_field(
+    k: &Kit,
+    label: &str,
+    placeholder: &str,
+    value: &TextEdit,
+    get_text: fn(&Ui) -> &TextEdit,
+    on_edit: fn(&mut Ui) -> &mut TextEdit,
+    on_submit: fn(&mut Ui, &str),
+) -> El {
+    field(
+        label,
+        TextInput::new(value)
+            .label(label)
+            .placeholder(placeholder)
+            .width(None)
+            .on_edit(on_edit)
+            .on_submit(move |s: &mut Ui, _| {
+                let text = get_text(s).text.trim().to_string();
+                on_submit(s, &text);
+            })
+            .build(k),
+        k,
+    )
+}
+
+fn valid_crop(value: &str) -> bool {
+    let parts: Vec<&str> = value.split(':').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn commit_crop(s: &mut Ui, text: &str) {
+    if !text.is_empty() && !valid_crop(text) {
+        let current = s.config.crop.clone().unwrap_or_default();
+        s.crop.replace_text(current);
+        return;
+    }
+    s.config.crop = if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    };
+    s.save_config();
+}
+
+fn commit_window_title(s: &mut Ui, text: &str) {
+    s.config.window_title = if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    };
+    s.save_config();
+}
+
+fn commit_window_dimension(s: &mut Ui, text: &str, width: bool) {
+    if text.is_empty() {
+        if width {
+            s.config.window_width = None;
+        } else {
+            s.config.window_height = None;
+        }
+        s.save_config();
+        return;
+    }
+    match text.parse::<u32>() {
+        Ok(value) if (100..=10000).contains(&value) => {
+            if width {
+                s.config.window_width = Some(value);
+            } else {
+                s.config.window_height = Some(value);
+            }
+            s.save_config();
+        }
+        _ => {
+            let current = if width {
+                s.config.window_width
+            } else {
+                s.config.window_height
+            };
+            let fallback = current.map(|value| value.to_string()).unwrap_or_default();
+            if width {
+                s.window_width.replace_text(fallback);
+            } else {
+                s.window_height.replace_text(fallback);
+            }
+        }
+    }
+}
+
+fn commit_window_width(s: &mut Ui, text: &str) {
+    commit_window_dimension(s, text, true);
+}
+
+fn commit_window_height(s: &mut Ui, text: &str) {
+    commit_window_dimension(s, text, false);
+}
+
+fn commit_start_app(s: &mut Ui, text: &str) {
+    s.config.start_app = if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    };
+    s.save_config();
+}
+
 fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
     let mut content = col()
         .w_full()
@@ -944,20 +1355,60 @@ fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
     } else if matches!(s.tab, SessionKind::Camera) {
         content = content.child(bitrate_field(s, k));
     }
+    content = content
+        .child(advanced_text_field(
+            k,
+            tr(s, "controlPanel.crop"),
+            tr(s, "controlPanel.cropPlaceholder"),
+            &s.crop,
+            |s| &s.crop,
+            |s| &mut s.crop,
+            commit_crop,
+        ))
+        .child(advanced_text_field(
+            k,
+            tr(s, "controlPanel.windowTitle"),
+            tr(s, "controlPanel.windowTitlePlaceholder"),
+            &s.window_title,
+            |s| &s.window_title,
+            |s| &mut s.window_title,
+            commit_window_title,
+        ))
+        .child(row().w_full().gap(12.0).children(vec![
+            cell(advanced_text_field(
+                k,
+                tr(s, "controlPanel.windowWidth"),
+                tr(s, "controlPanel.windowSizePlaceholder"),
+                &s.window_width,
+                |s| &s.window_width,
+                |s| &mut s.window_width,
+                commit_window_width,
+            )),
+            cell(advanced_text_field(
+                k,
+                tr(s, "controlPanel.windowHeight"),
+                tr(s, "controlPanel.windowSizePlaceholder"),
+                &s.window_height,
+                |s| &s.window_height,
+                |s| &mut s.window_height,
+                commit_window_height,
+            )),
+        ]));
     content.child(advanced_switches(s, k))
 }
 
 fn advanced_count(s: &Ui) -> usize {
     // The badge mirrors the advanced body per tab: `advanced_selects` builds the
-    // selector row, `advanced_content` adds bitrate/background rows and
-    // `advanced_switches` the toggles. Mirror: display/rotation/renderer/hwdec/
-    // video-encoder/gamepad + vsync/ignore/no-control = 9. Camera drops display,
-    // adds bitrate + camera-high-speed = 10. Desktop adds fps, bitrate,
-    // background and flex = 12.
+    // selector row, `advanced_content` adds bitrate/background/text rows and
+    // `advanced_switches` the toggles.
+    // Mirror: display, 4 orientation/angle, render-fit, renderer, hwdec,
+    // video-encoder, gamepad (10) + crop/title/width/height (4) + 3 switches.
+    // Camera drops display and adds camera-size; desktop adds fps, bitrate,
+    // background, flex and IME policy.
     match s.tab {
-        SessionKind::Mirror => 9,
-        SessionKind::Camera => 10,
-        SessionKind::Desktop => 12,
+        SessionKind::Mirror => 17,
+        SessionKind::Camera => 19,
+        SessionKind::Desktop => 22,
     }
 }
 
@@ -1097,11 +1548,14 @@ fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         .expanded(s.advanced_open)
         .on_press(|s: &mut Ui| {
             s.advanced_open = !s.advanced_open;
-            // The display and encoder lists are device state; refresh them
-            // when the section opens so the pickers are populated.
+            // Device-specific inventories are refreshed when the section opens
+            // so the pickers are populated.
             if s.advanced_open {
                 s.refresh_displays();
                 s.refresh_encoders();
+                s.refresh_cameras();
+                s.refresh_camera_sizes();
+                s.refresh_apps();
             }
         })
         .build(k)
@@ -1632,7 +2086,12 @@ fn topbar(s: &Ui, k: &Kit, insets: rune::ChromeInsets) -> El {
         .label(tr(s, "settings.title"))
         .on_press(|s: &mut Ui| {
             s.settings_open = !s.settings_open;
-            if !s.settings_open {
+            if s.settings_open {
+                // The drawer's start-app picker needs the installed-app list.
+                if s.apps.is_empty() {
+                    s.refresh_apps();
+                }
+            } else {
                 s.open_select = None;
             }
         })
@@ -1913,6 +2372,42 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                 s.save_config();
             },
         ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.showTouches"),
+            s.config.show_touches.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.show_touches, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.disableScreensaver"),
+            s.config.disable_screensaver.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.disable_screensaver, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.powerOffOnClose"),
+            s.config.power_off_on_close.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.power_off_on_close, false);
+                s.save_config();
+            },
+        ),
+        switch_row(
+            k,
+            tr(s, "sessionBehavior.printFps"),
+            s.config.print_fps.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.print_fps, false);
+                s.save_config();
+            },
+        ),
     ];
     let mut content = col()
         .w_full()
@@ -1930,6 +2425,50 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                 tr(s, "sessionBehavior.audioCodec"),
                 170.0,
             ),
+            k,
+        ))
+        .child(field(
+            tr(s, "sessionBehavior.audioSource"),
+            select_control(
+                s,
+                k,
+                layer,
+                "audio_source",
+                AUDIO_SOURCE_OPTIONS,
+                s.config.audio_source.as_deref().unwrap_or("output"),
+                tr(s, "sessionBehavior.audioSource"),
+                220.0,
+            ),
+            k,
+        ))
+        .child(field(
+            tr(s, "sessionBehavior.audioBitRate"),
+            select_control(
+                s,
+                k,
+                layer,
+                "audio_bit_rate",
+                AUDIO_BIT_RATE_OPTIONS,
+                s.config.audio_bit_rate.as_deref().unwrap_or("default"),
+                tr(s, "sessionBehavior.audioBitRate"),
+                170.0,
+            ),
+            k,
+        ))
+        .child(audio_buffer_field(s, k))
+        .child(screen_off_timeout_field(s, k))
+        .child(advanced_text_field(
+            k,
+            tr(s, "sessionBehavior.startApp"),
+            tr(s, "controlPanel.startAppPlaceholder"),
+            &s.start_app,
+            |s| &s.start_app,
+            |s| &mut s.start_app,
+            commit_start_app,
+        ))
+        .child(field(
+            tr(s, "sessionBehavior.startAppPick"),
+            start_app_picker(s, k, layer),
             k,
         ));
     if s.config.record.unwrap_or(false) {
@@ -1981,6 +2520,33 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
                 s.config.record_no_playback.unwrap_or(false),
                 |s| {
                     flip(&mut s.config.record_no_playback, false);
+                    s.save_config();
+                },
+            ))
+            .child(switch_row(
+                k,
+                tr(s, "sessionBehavior.noWindow"),
+                s.config.no_window.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.no_window, false);
+                    s.save_config();
+                },
+            ))
+            .child(switch_row(
+                k,
+                tr(s, "sessionBehavior.noVideoPlayback"),
+                s.config.no_video_playback.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.no_video_playback, false);
+                    s.save_config();
+                },
+            ))
+            .child(switch_row(
+                k,
+                tr(s, "sessionBehavior.noAudioPlayback"),
+                s.config.no_audio_playback.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.no_audio_playback, false);
                     s.save_config();
                 },
             ));
@@ -2679,6 +3245,14 @@ mod tests {
             camera_facing: camera_facing.map(str::to_string),
             ..ScrcpyConfig::default()
         }
+    }
+
+    #[test]
+    fn crop_validation_accepts_four_numbers() {
+        assert!(valid_crop("1080:1920:0:100"));
+        assert!(!valid_crop("1080:1920:0"));
+        assert!(!valid_crop("a:b:c:d"));
+        assert!(!valid_crop(""));
     }
 
     #[test]
