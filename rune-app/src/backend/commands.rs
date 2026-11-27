@@ -125,6 +125,125 @@ fn create_command<S: AsRef<std::ffi::OsStr>>(program: S) -> TokioCommand {
     cmd
 }
 
+/// scrcpy server startup (listing displays/encoders) can take a few seconds on
+/// a slow device; bound it so a wedged adb/server cannot hang the UI query.
+const SCRCPY_QUERY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Parses `scrcpy --list-displays` output:
+/// `    --display-id=0    (1240x2772)`.
+fn parse_display_list(text: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("--display-id=") else {
+            continue;
+        };
+        let (id, rest) = match rest.split_once(char::is_whitespace) {
+            Some((id, rest)) => (id, rest.trim()),
+            None => (rest, ""),
+        };
+        let Ok(id) = id.parse::<u32>() else { continue };
+        let size = rest
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .to_string();
+        out.push(json!({ "id": id, "size": size }));
+    }
+    out
+}
+
+/// Parses `scrcpy --list-encoders` video lines:
+/// `--video-codec=h264 --video-encoder=c2.qti.avc.encoder (hw) [vendor]`.
+fn parse_video_encoders(text: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut codec = None;
+        let mut encoder = None;
+        let mut hw = false;
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix("--video-codec=") {
+                codec = Some(value);
+            } else if let Some(value) = token.strip_prefix("--video-encoder=") {
+                encoder = Some(value);
+            } else if token == "(hw)" {
+                hw = true;
+            }
+        }
+        if let (Some(codec), Some(encoder)) = (codec, encoder) {
+            out.push(json!({ "codec": codec, "id": encoder, "hw": hw }));
+        }
+    }
+    out
+}
+
+/// Lists the device's displays for `--display-id` selection.
+pub async fn list_displays(device: String, custom_path: Option<String>) -> serde_json::Value {
+    let exe_path = get_binary_path("scrcpy", custom_path);
+    let mut command = create_command(&exe_path);
+    command.arg("-s").arg(&device).arg("--list-displays");
+    match timeout(SCRCPY_QUERY_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => {
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let displays = parse_display_list(&text);
+            json!({ "success": !displays.is_empty(), "displays": displays })
+        }
+        Ok(Err(error)) => json!({
+            "success": false,
+            "displays": [],
+            "message": error.to_string(),
+        }),
+        Err(_) => json!({
+            "success": false,
+            "displays": [],
+            "message": "list-displays timed out",
+        }),
+    }
+}
+
+/// Lists the device's video encoders that match `codec`, for `--video-encoder`.
+pub async fn list_video_encoders(
+    device: String,
+    codec: String,
+    custom_path: Option<String>,
+) -> serde_json::Value {
+    let exe_path = get_binary_path("scrcpy", custom_path);
+    let mut command = create_command(&exe_path);
+    command.arg("-s").arg(&device).arg("--list-encoders");
+    match timeout(SCRCPY_QUERY_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => {
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let wanted = codec.trim();
+            let encoders: Vec<serde_json::Value> = parse_video_encoders(&text)
+                .into_iter()
+                .filter(|encoder| {
+                    encoder
+                        .get("codec")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(wanted))
+                })
+                .collect();
+            json!({ "success": !encoders.is_empty(), "encoders": encoders })
+        }
+        Ok(Err(error)) => json!({
+            "success": false,
+            "encoders": [],
+            "message": error.to_string(),
+        }),
+        Err(_) => json!({
+            "success": false,
+            "encoders": [],
+            "message": "list-encoders timed out",
+        }),
+    }
+}
+
 pub async fn check_scrcpy(custom_path: Option<String>) -> serde_json::Value {
     let exe_path = get_binary_path("scrcpy", custom_path);
 
@@ -1072,9 +1191,61 @@ pub struct ScrcpyConfig {
     /// Useful when the device reports incorrect encoder limits that prevent
     /// scrcpy from starting.
     pub ignore_video_encoder_constraints: Option<bool>,
+    // v5 additions wired by the GUI.
+    /// Mirror a secondary device display (`--display-id`). None = main display.
+    pub display_id: Option<u32>,
+    /// Specific MediaCodec video encoder (`--video-encoder`). None/"auto" lets
+    /// scrcpy choose; the value is validated against the device-side name
+    /// charset before it becomes an argument.
+    pub video_encoder: Option<String>,
+    /// Recording container (`--record-format`): mp4, mkv, m4a, mka, opus, aac,
+    /// flac or wav. None keeps scrcpy's extension-derived default (mkv here).
+    pub record_format: Option<String>,
+    /// Stop the session after this many seconds (`--time-limit`). None/0 = no
+    /// limit.
+    pub record_time_limit: Option<u32>,
+    /// Record without playing back on the computer (`--no-playback`).
+    pub record_no_playback: Option<bool>,
+    /// Mirror in read-only mode (`--no-control`).
+    pub no_control: Option<bool>,
+    /// Gamepad forwarding mode (`--gamepad`): "uhid" or "aoa". None/"disabled"
+    /// keeps scrcpy's default (no gamepad).
+    pub gamepad: Option<String>,
 }
 
 const HWDEC_VALUES: &[&str] = &["disabled", "vaapi", "d3d11va", "videotoolbox"];
+
+/// Recording containers scrcpy accepts for `--record-format`.
+const RECORD_FORMATS: &[&str] = &["mp4", "mkv", "m4a", "mka", "opus", "aac", "flac", "wav"];
+
+/// Device-side MediaCodec encoder names are dotted identifiers. The allowlist
+/// keeps a hand-edited config from injecting an extra flag through the value.
+fn sanitize_encoder_name(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()
+        && trimmed.len() <= 128
+        && !trimmed.starts_with('-')
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    .then_some(trimmed)
+}
+
+fn resolve_record_format(config: &ScrcpyConfig) -> Option<&'static str> {
+    let requested = config.record_format.as_deref()?.trim();
+    RECORD_FORMATS
+        .iter()
+        .find(|format| requested.eq_ignore_ascii_case(format))
+        .copied()
+}
+
+/// The gamepad mode to pass, or None for scrcpy's default (disabled).
+fn resolve_gamepad_mode(config: &ScrcpyConfig) -> Option<&'static str> {
+    let requested = config.gamepad.as_deref()?.trim();
+    ["uhid", "aoa"]
+        .into_iter()
+        .find(|mode| requested.eq_ignore_ascii_case(mode))
+}
 
 /// The SDL driver names scrcpy accepts for `--render-driver`. Like hwdec, the
 /// config value goes through an allowlist so a stale or hand-edited entry
@@ -1661,6 +1832,41 @@ fn build_scrcpy_args(
             }
         }
 
+        // Mirror a secondary display. `--display-id` belongs to the display
+        // video source, not camera, and a virtual display (desktop mode)
+        // creates its own display, so it is mirror-only.
+        if config.session_mode == "mirror" {
+            if let Some(display_id) = config.display_id {
+                args.push(format!("--display-id={}", display_id));
+            }
+        }
+
+        // `--video-encoder` selects the device-side MediaCodec encoder for the
+        // chosen `--video-codec`; it applies to every video source.
+        if let Some(encoder) = config
+            .video_encoder
+            .as_deref()
+            .and_then(sanitize_encoder_name)
+        {
+            args.push(format!("--video-encoder={}", encoder));
+        }
+
+        if let Some(true) = config.no_control {
+            args.push("--no-control".to_string());
+        }
+
+        if let Some(gamepad) = resolve_gamepad_mode(config) {
+            args.push(format!("--gamepad={}", gamepad));
+        }
+
+        if let Some(limit) = config.record_time_limit.filter(|limit| *limit > 0) {
+            args.push(format!("--time-limit={}", limit));
+        }
+
+        if let Some(true) = config.record_no_playback {
+            args.push("--no-playback".to_string());
+        }
+
         // Restore the last saved window position (client-area origin), for
         // mirror sessions only. Skipped in fullscreen (scrcpy ignores it) and
         // for camera/desktop, whose windows must not share, or overwrite, the
@@ -1805,13 +2011,21 @@ fn build_scrcpy_args(
                     path = video_dir_fallback.unwrap_or_else(|| ".".to_string());
                 }
 
+                // The container is chosen by `--record-format` when set; the
+                // filename must use the same extension so scrcpy does not
+                // reject the mismatch.
+                let format = resolve_record_format(config).unwrap_or("mkv");
                 let filename = format!(
-                    "scrcpy_{}_{}.mkv",
+                    "scrcpy_{}_{}.{}",
                     sanitize_record_component(&config.device),
-                    chrono::Local::now().format("%Y%m%d_%H%M%S")
+                    chrono::Local::now().format("%Y%m%d_%H%M%S"),
+                    format
                 );
                 let full_path = std::path::Path::new(&path).join(filename);
                 args.push(format!("--record={}", full_path.to_string_lossy()));
+                if resolve_record_format(config).is_some() {
+                    args.push(format!("--record-format={}", format));
+                }
             }
         }
 
@@ -2764,6 +2978,13 @@ mod tests {
             window_x: None,
             window_y: None,
             ignore_video_encoder_constraints: None,
+            display_id: None,
+            video_encoder: None,
+            record_format: None,
+            record_time_limit: None,
+            record_no_playback: None,
+            no_control: None,
+            gamepad: None,
         }
     }
 
@@ -3224,6 +3445,117 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
         assert_eq!(sanitize_record_component("é"), "_");
         assert_eq!(sanitize_record_component(""), "device");
         assert!(sanitize_record_component(&"x".repeat(100)).len() <= 64);
+    }
+
+    #[test]
+    fn test_encoder_name_is_allowlisted() {
+        assert_eq!(
+            sanitize_encoder_name("c2.qti.avc.encoder"),
+            Some("c2.qti.avc.encoder")
+        );
+        assert_eq!(
+            sanitize_encoder_name(" OMX.google.h264.encoder "),
+            Some("OMX.google.h264.encoder")
+        );
+        assert_eq!(sanitize_encoder_name("--no-audio"), None);
+        assert_eq!(sanitize_encoder_name("bad name"), None);
+        assert_eq!(sanitize_encoder_name(""), None);
+
+        let mut config = base_config("mirror");
+        config.video_encoder = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--video-encoder")));
+
+        config.video_encoder = Some("c2.qti.avc.encoder".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--video-encoder=c2.qti.avc.encoder".to_string()));
+    }
+
+    #[test]
+    fn test_display_id_is_mirror_only() {
+        let mut config = base_config("mirror");
+        config.display_id = Some(61);
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--display-id=61".to_string()));
+
+        let mut camera = base_config("camera");
+        camera.display_id = Some(61);
+        let args = build_scrcpy_args(&camera, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--display-id")));
+    }
+
+    #[test]
+    fn test_no_control_and_gamepad() {
+        let mut config = base_config("mirror");
+        config.no_control = Some(true);
+        config.gamepad = Some("uhid".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--no-control".to_string()));
+        assert!(args.contains(&"--gamepad=uhid".to_string()));
+
+        config.gamepad = Some("disabled".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--gamepad")));
+
+        config.gamepad = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--gamepad")));
+    }
+
+    #[test]
+    fn test_record_format_and_time_limit() {
+        let mut config = base_config("mirror");
+        config.record = Some(true);
+        config.record_format = Some("mp4".to_string());
+        config.record_time_limit = Some(300);
+        config.record_no_playback = Some(true);
+
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(args.contains(&"--record-format=mp4".to_string()));
+        assert!(args.contains(&"--time-limit=300".to_string()));
+        assert!(args.contains(&"--no-playback".to_string()));
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--record=") && a.ends_with(".mp4"))
+        );
+
+        // An unknown format falls back to mkv and is not passed as a flag.
+        config.record_format = Some("--no-audio".to_string());
+        let args = build_scrcpy_args(&config, None, None);
+        assert!(!args.iter().any(|a| a.starts_with("--record-format")));
+        assert!(
+            args.iter()
+                .any(|a| a.starts_with("--record=") && a.ends_with(".mkv"))
+        );
+    }
+
+    #[test]
+    fn test_parse_display_list() {
+        let text = "scrcpy 5.0.1\n[server] INFO: List of displays:\n    --display-id=0    (1240x2772)\n    --display-id=61    (356x800)\n";
+        let displays = parse_display_list(text);
+        assert_eq!(displays.len(), 2);
+        assert_eq!(displays[0]["id"], 0);
+        assert_eq!(displays[0]["size"], "1240x2772");
+        assert_eq!(displays[1]["id"], 61);
+        assert_eq!(displays[1]["size"], "356x800");
+    }
+
+    #[test]
+    fn test_parse_video_encoders() {
+        let text = "\
+[server] INFO: List of video encoders:
+    --video-codec=h264 --video-encoder=c2.qti.avc.encoder            (hw) [vendor]
+    --video-codec=h264 --video-encoder=c2.android.avc.encoder        (sw)
+    --video-codec=h265 --video-encoder=c2.qti.hevc.encoder           (hw) [vendor]
+[server] INFO: List of audio encoders:
+    --audio-codec=opus --audio-encoder=c2.android.opus.encoder       (sw)
+";
+        let encoders = parse_video_encoders(text);
+        assert_eq!(encoders.len(), 3);
+        assert_eq!(encoders[0]["id"], "c2.qti.avc.encoder");
+        assert_eq!(encoders[0]["hw"], true);
+        assert_eq!(encoders[1]["hw"], false);
+        assert_eq!(encoders[2]["codec"], "h265");
     }
 
     #[test]

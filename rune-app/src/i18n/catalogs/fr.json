@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "Aucun appareil détecté. Vérifiez le câble ou appuyez sur Actualiser.",
   "sidebar.wirelessConnect": "Connexion sans fil",
   "settings.inputGroup": "Entrée et audio",
-  "device.select": "Sélectionner un appareil"
+  "device.select": "Sélectionner un appareil",
+  "controlPanel.display": "Affichage",
+  "controlPanel.displayMain": "Écran principal",
+  "controlPanel.videoEncoder": "Encodeur vidéo",
+  "controlPanel.videoEncoderAuto": "Auto",
+  "controlPanel.gamepad": "Manette",
+  "controlPanel.gamepadDisabled": "Désactivée",
+  "controlPanel.gamepadUhid": "UHID (virtuelle)",
+  "controlPanel.gamepadAoa": "AOA (USB)",
+  "controlPanel.noControl": "Lecture seule",
+  "controlPanel.cameraHighSpeed": "Caméra haute vitesse",
+  "sessionBehavior.recordFormat": "Format d'enregistrement",
+  "sessionBehavior.recordTimeLimit": "Durée limite",
+  "sessionBehavior.recordTimeLimitOff": "Sans limite",
+  "sessionBehavior.recordNoPlayback": "Enregistrer seulement"
 }

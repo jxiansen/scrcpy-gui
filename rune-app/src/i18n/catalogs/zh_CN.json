@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "未检测到设备，请检查连接或点击刷新",
   "sidebar.wirelessConnect": "无线连接",
   "settings.inputGroup": "输入与音频",
-  "device.select": "选择设备"
+  "device.select": "选择设备",
+  "controlPanel.display": "显示器",
+  "controlPanel.displayMain": "主显示器",
+  "controlPanel.videoEncoder": "视频编码器",
+  "controlPanel.videoEncoderAuto": "自动",
+  "controlPanel.gamepad": "手柄",
+  "controlPanel.gamepadDisabled": "禁用",
+  "controlPanel.gamepadUhid": "UHID（虚拟手柄）",
+  "controlPanel.gamepadAoa": "AOA（USB 手柄）",
+  "controlPanel.noControl": "只读模式",
+  "controlPanel.cameraHighSpeed": "高速相机",
+  "sessionBehavior.recordFormat": "录制格式",
+  "sessionBehavior.recordTimeLimit": "时长限制",
+  "sessionBehavior.recordTimeLimitOff": "不限制",
+  "sessionBehavior.recordNoPlayback": "仅录制（不播放）"
 }

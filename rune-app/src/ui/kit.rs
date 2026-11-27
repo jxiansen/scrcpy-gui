@@ -29,6 +29,11 @@ const AUDIO_CODEC: &[&str] = &["auto", "opus", "aac", "flac", "raw"];
 const LENSES: &[&str] = &["Auto Select", "Back", "Front", "External"];
 const PRESETS: &[&str] = &["Custom", "1080p", "1440p", "4K", "21:9"];
 const LOCALES: &[&str] = &["en", "fr", "pt-BR", "zh-CN", "zh-TW", "ru", "id", "ar"];
+/// `--gamepad` modes; "disabled" means no flag is passed.
+const GAMEPAD_OPTIONS: &[&str] = &["disabled", "uhid", "aoa"];
+/// `--record-format` containers exposed in the GUI. Video containers only:
+/// the audio-only ones are left to the CLI.
+const RECORD_FORMAT_OPTIONS: &[&str] = &["mkv", "mp4"];
 
 /// `Auto` plus the scrcpy `--render-driver` values legal on this OS, mirroring
 /// the backend allowlist. `swiftshader`/`native` are not SDL driver names; the
@@ -104,6 +109,10 @@ fn display_option(locale: &str, key: &str, value: &str) -> String {
         ("preset", "1440p") => "controlPanel.preset1440p",
         ("preset", "4K") => "controlPanel.preset4k",
         ("preset", "21:9") => "controlPanel.presetUltrawide",
+        ("gamepad", "disabled") => "controlPanel.gamepadDisabled",
+        ("gamepad", "uhid") => "controlPanel.gamepadUhid",
+        ("gamepad", "aoa") => "controlPanel.gamepadAoa",
+        ("record_format", _) => return value.to_uppercase(),
         ("rotation", _) => return format!("{value}°"),
         _ => return value.to_string(),
     };
@@ -174,13 +183,35 @@ fn lens_current(config: &ScrcpyConfig) -> String {
 fn apply_choice(s: &mut Ui, key: &str, v: &str) {
     match key {
         "fps" => s.config.fps = if v == "Auto" { None } else { v.parse().ok() },
-        "codec" => s.config.codec = Some(v.into()),
+        "codec" => {
+            s.config.codec = Some(v.into());
+            // Encoders are codec-specific; a stale pick would be rejected by
+            // scrcpy. Clear it and re-list for the new codec.
+            s.config.video_encoder = None;
+            s.refresh_encoders();
+        }
         "res" => s.config.res = Some(v.into()),
         "rotation" => s.config.rotation = Some(v.into()),
-        "renderer" => s.config.render_driver = if v == "Auto" { None } else { Some(v.into()) },
+        "renderer" => {
+            s.config.render_driver = if v == "Auto" { None } else { Some(v.into()) };
+        }
         "hwdec" => s.config.hwdec = Some(v.into()),
         "aspect" => s.config.camera_ar = Some(v.into()),
         "audio" => s.config.audio_codec = Some(v.into()),
+        "display" => {
+            s.config.display_id = if v == "auto" { None } else { v.parse().ok() };
+        }
+        "video_encoder" => {
+            s.config.video_encoder = if v == "auto" { None } else { Some(v.into()) };
+        }
+        "gamepad" => {
+            s.config.gamepad = if v == "disabled" {
+                None
+            } else {
+                Some(v.into())
+            };
+        }
+        "record_format" => s.config.record_format = Some(v.into()),
         "lens" => write_lens_choice(&mut s.config, v),
         "preset" => match v {
             "1080p" => {
@@ -212,22 +243,27 @@ fn apply_choice(s: &mut Ui, key: &str, v: &str) {
 /// disruptive for a quick choice). A transparent full-window press target sits
 /// under the panel, so an outside click dismisses it without a scrim and
 /// without blocking the visuals; the trigger toggles it too.
-fn select_control(
+///
+/// `labels[i]` is what the user reads and `raw[i]` the value stored in the
+/// config and passed to `apply_choice`, so a dynamic list (displays, encoders)
+/// can supply its own labels without going through `display_option`.
+fn select_panel(
     s: &Ui,
     k: &Kit,
     layer: &mut Vec<El>,
     key: &'static str,
-    options: &[&str],
+    labels: &[String],
+    raw: &[String],
     current: &str,
     label: &str,
     width: f32,
 ) -> El {
-    let labels: Vec<String> = options
+    let current_label = raw
         .iter()
-        .map(|v| display_option(&s.locale, key, v))
-        .collect();
-    let raw: Vec<String> = options.iter().map(|v| (*v).to_string()).collect();
-    let current_label = display_option(&s.locale, key, current);
+        .position(|value| value == current)
+        .and_then(|index| labels.get(index))
+        .cloned()
+        .unwrap_or_else(|| current.to_string());
 
     if s.open_select.as_deref() == Some(key) {
         // Below the panel in stacking order, transparent so it never hides the
@@ -288,6 +324,24 @@ fn select_control(
         .key(format!("{key}-trigger"))
         .role("combobox")
         .label(label)
+}
+
+fn select_control(
+    s: &Ui,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    key: &'static str,
+    options: &[&str],
+    current: &str,
+    label: &str,
+    width: f32,
+) -> El {
+    let labels: Vec<String> = options
+        .iter()
+        .map(|value| display_option(&s.locale, key, value))
+        .collect();
+    let raw: Vec<String> = options.iter().map(|value| (*value).to_string()).collect();
+    select_panel(s, k, layer, key, &labels, &raw, current, label, width)
 }
 
 fn field(label: &str, control: El, k: &Kit) -> El {
@@ -501,6 +555,36 @@ fn bitrate_field(s: &Ui, k: &Kit) -> El {
     )
 }
 
+/// `--time-limit` in whole minutes; 0 = no limit. Stored in seconds.
+fn record_time_limit_field(s: &Ui, k: &Kit) -> El {
+    let minutes = (s.config.record_time_limit.unwrap_or(0) as f32) / 60.0;
+    let slider = Slider::new("record_time_limit", minutes)
+        .range(0.0..=120.0)
+        .step(1.0)
+        .label(tr(s, "sessionBehavior.recordTimeLimit"))
+        .hide_label()
+        .width(SLIDER_W)
+        .on_change(|s: &mut Ui, v, done| {
+            let seconds = (v.round() as u32).saturating_mul(60);
+            s.config.record_time_limit = (seconds > 0).then_some(seconds);
+            if done {
+                s.save_config();
+            }
+        })
+        .build(k);
+    let value_text = if minutes <= 0.0 {
+        tr(s, "sessionBehavior.recordTimeLimitOff").to_string()
+    } else {
+        format!("{} min", minutes.round() as u32)
+    };
+    labeled_slider(
+        k,
+        tr(s, "sessionBehavior.recordTimeLimit"),
+        value_text,
+        slider,
+    )
+}
+
 fn zoom_field(s: &Ui, k: &Kit) -> El {
     let value = s.config.camera_zoom.unwrap_or(1.0);
     let slider = Slider::new("zoom", value)
@@ -665,6 +749,68 @@ fn essential_fields(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     }
 }
 
+/// The `--display-id` picker: "auto" (main display) plus the device's listed
+/// displays, fetched by `Ui::refresh_displays`.
+fn display_select(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut raw = vec!["auto".to_string()];
+    let mut labels = vec![tr(s, "controlPanel.displayMain").to_string()];
+    for display in &s.displays {
+        raw.push(display.id.to_string());
+        labels.push(if display.size.is_empty() {
+            format!("#{}", display.id)
+        } else {
+            format!("#{} · {}", display.id, display.size)
+        });
+    }
+    let current = s
+        .config
+        .display_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    select_panel(
+        s,
+        k,
+        layer,
+        "display",
+        &labels,
+        &raw,
+        &current,
+        tr(s, "controlPanel.display"),
+        SELECT_W,
+    )
+}
+
+/// The `--video-encoder` picker: "auto" plus the encoders the device lists for
+/// the current codec (`Ui::refresh_encoders` re-runs when the codec changes).
+fn video_encoder_select(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
+    let mut raw = vec!["auto".to_string()];
+    let mut labels = vec![tr(s, "controlPanel.videoEncoderAuto").to_string()];
+    for encoder in &s.video_encoders {
+        raw.push(encoder.id.clone());
+        labels.push(format!(
+            "{} ({})",
+            encoder.id,
+            if encoder.hw { "hw" } else { "sw" }
+        ));
+    }
+    let current = s
+        .config
+        .video_encoder
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
+    select_panel(
+        s,
+        k,
+        layer,
+        "video_encoder",
+        &labels,
+        &raw,
+        &current,
+        tr(s, "controlPanel.videoEncoder"),
+        SELECT_W,
+    )
+}
+
 fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
     let mut fields = Vec::new();
     if matches!(s.tab, SessionKind::Desktop) {
@@ -679,6 +825,13 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "Auto".into()),
             "controlPanel.fps",
+        )));
+    }
+    if matches!(s.tab, SessionKind::Mirror) {
+        fields.push(cell(field(
+            tr(s, "controlPanel.display"),
+            display_select(s, k, layer),
+            k,
         )));
     }
     fields.push(cell(select_field(
@@ -708,6 +861,20 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
         s.config.hwdec.as_deref().unwrap_or("auto"),
         "controlPanel.hardwareDecoding",
     )));
+    fields.push(cell(field(
+        tr(s, "controlPanel.videoEncoder"),
+        video_encoder_select(s, k, layer),
+        k,
+    )));
+    fields.push(cell(select_field(
+        s,
+        k,
+        layer,
+        "gamepad",
+        GAMEPAD_OPTIONS,
+        s.config.gamepad.as_deref().unwrap_or("disabled"),
+        "controlPanel.gamepad",
+    )));
     fields
 }
 
@@ -731,6 +898,26 @@ fn advanced_switches(s: &Ui, k: &Kit) -> El {
             s.save_config();
         },
     )));
+    cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+        k,
+        tr(s, "controlPanel.noControl"),
+        s.config.no_control.unwrap_or(false),
+        |s| {
+            flip(&mut s.config.no_control, false);
+            s.save_config();
+        },
+    )));
+    if matches!(s.tab, SessionKind::Camera) {
+        cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
+            k,
+            tr(s, "controlPanel.cameraHighSpeed"),
+            s.config.camera_high_speed.unwrap_or(false),
+            |s| {
+                flip(&mut s.config.camera_high_speed, false);
+                s.save_config();
+            },
+        )));
+    }
     if matches!(s.tab, SessionKind::Desktop) {
         cells.push(col().grow(1.0).min_w(0.0).child(switch_row(
             k,
@@ -763,13 +950,14 @@ fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
 fn advanced_count(s: &Ui) -> usize {
     // The badge mirrors the advanced body per tab: `advanced_selects` builds the
     // selector row, `advanced_content` adds bitrate/background rows and
-    // `advanced_switches` the toggles. Mirror: rotation/renderer/hwdec + vsync +
-    // ignore-constraints = 5. Camera adds bitrate = 6. Desktop adds fps,
-    // bitrate, background, flex = 9.
+    // `advanced_switches` the toggles. Mirror: display/rotation/renderer/hwdec/
+    // video-encoder/gamepad + vsync/ignore/no-control = 9. Camera drops display,
+    // adds bitrate + camera-high-speed = 10. Desktop adds fps, bitrate,
+    // background and flex = 12.
     match s.tab {
-        SessionKind::Mirror => 5,
-        SessionKind::Camera => 6,
-        SessionKind::Desktop => 9,
+        SessionKind::Mirror => 9,
+        SessionKind::Camera => 10,
+        SessionKind::Desktop => 12,
     }
 }
 
@@ -907,7 +1095,15 @@ fn settings_card(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
         .control_size(ControlSize::Regular)
         .icon(&icons::SLIDERS)
         .expanded(s.advanced_open)
-        .on_press(|s: &mut Ui| s.advanced_open = !s.advanced_open)
+        .on_press(|s: &mut Ui| {
+            s.advanced_open = !s.advanced_open;
+            // The display and encoder lists are device state; refresh them
+            // when the section opens so the pickers are populated.
+            if s.advanced_open {
+                s.refresh_displays();
+                s.refresh_encoders();
+            }
+        })
         .build(k)
         .justify_start()
         .key("advanced-toggle"),
@@ -1737,32 +1933,57 @@ fn drawer_behavior(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
             k,
         ));
     if s.config.record.unwrap_or(false) {
-        content = content.child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .center_y()
-                .child(
-                    text(
-                        s.config
-                            .record_path
-                            .as_deref()
-                            .unwrap_or_else(|| tr(s, "sessionBehavior.defaultVideosFolder")),
+        content = content
+            .child(
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .center_y()
+                    .child(
+                        text(
+                            s.config
+                                .record_path
+                                .as_deref()
+                                .unwrap_or_else(|| tr(s, "sessionBehavior.defaultVideosFolder")),
+                        )
+                        .font(k.ty.small)
+                        .color(k.c.text_faint)
+                        .truncate()
+                        .grow(1.0),
                     )
-                    .font(k.ty.small)
-                    .color(k.c.text_faint)
-                    .truncate()
-                    .grow(1.0),
-                )
-                .child(folder_button(
+                    .child(folder_button(
+                        s,
+                        k,
+                        tr(s, "sessionBehavior.change"),
+                        |s, path| {
+                            s.set_record_path(path.to_string_lossy().to_string());
+                        },
+                    )),
+            )
+            .child(field(
+                tr(s, "sessionBehavior.recordFormat"),
+                select_control(
                     s,
                     k,
-                    tr(s, "sessionBehavior.change"),
-                    |s, path| {
-                        s.set_record_path(path.to_string_lossy().to_string());
-                    },
-                )),
-        );
+                    layer,
+                    "record_format",
+                    RECORD_FORMAT_OPTIONS,
+                    s.config.record_format.as_deref().unwrap_or("mkv"),
+                    tr(s, "sessionBehavior.recordFormat"),
+                    170.0,
+                ),
+                k,
+            ))
+            .child(record_time_limit_field(s, k))
+            .child(switch_row(
+                k,
+                tr(s, "sessionBehavior.recordNoPlayback"),
+                s.config.record_no_playback.unwrap_or(false),
+                |s| {
+                    flip(&mut s.config.record_no_playback, false);
+                    s.save_config();
+                },
+            ));
     }
     drawer_section(k, tr(s, "sessionBehavior.title"), content)
 }

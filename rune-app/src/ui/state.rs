@@ -142,6 +142,23 @@ pub struct UpdateInfo {
     pub latest: String,
 }
 
+/// One device display from `scrcpy --list-displays`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct DisplayEntry {
+    pub id: u32,
+    #[serde(default)]
+    pub size: String,
+}
+
+/// One device video encoder from `scrcpy --list-encoders`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct VideoEncoder {
+    pub id: String,
+    /// `(hw)` in the listing; the label shows which encoders are hardware.
+    #[serde(default)]
+    pub hw: bool,
+}
+
 #[derive(Deserialize)]
 struct ScrcpyCheck {
     found: bool,
@@ -178,6 +195,10 @@ pub struct Ui {
     pub config: ScrcpyConfig,
     pub devices: Vec<Device>,
     pub mdns: Vec<MdnsService>,
+    /// Displays reported by `scrcpy --list-displays` for the selected device.
+    pub displays: Vec<DisplayEntry>,
+    /// Video encoders reported by `scrcpy --list-encoders` for the current codec.
+    pub video_encoders: Vec<VideoEncoder>,
     pub logs: Vec<(String, String)>,
     pub running: BTreeMap<String, bool>,
     pub history: Vec<String>,
@@ -297,6 +318,8 @@ impl Default for Ui {
             config,
             devices: Vec::new(),
             mdns: Vec::new(),
+            displays: Vec::new(),
+            video_encoders: Vec::new(),
             logs: Vec::new(),
             running: BTreeMap::new(),
             history,
@@ -409,6 +432,27 @@ impl Ui {
             service: "_adb-tls-connect._tcp".into(),
             address: "172.16.1.145:38517".into(),
         }];
+        // Deterministic lists for the expanded advanced section in headless scenes.
+        self.displays = vec![
+            DisplayEntry {
+                id: 0,
+                size: "1240x2772".into(),
+            },
+            DisplayEntry {
+                id: 61,
+                size: "356x800".into(),
+            },
+        ];
+        self.video_encoders = vec![
+            VideoEncoder {
+                id: "c2.qti.avc.encoder".into(),
+                hw: true,
+            },
+            VideoEncoder {
+                id: "c2.android.avc.encoder".into(),
+                hw: false,
+            },
+        ];
         self.logs = vec![
             ("12:34:56".into(), "[SYSTEM] ScrcpyGUI ready".into()),
             ("12:34:56".into(), "[SYSTEM] Device: PJA110".into()),
@@ -429,6 +473,8 @@ impl Ui {
         #[cfg(target_os = "windows")]
         crate::platform::grab::register(self.state.clone());
         self.check_scrcpy();
+        self.refresh_displays();
+        self.refresh_encoders();
         self.refresh_devices();
         self.reconnect_history();
         self.start_history_reconnect();
@@ -585,6 +631,20 @@ impl Ui {
             "mdns-list" => {
                 if let Ok(list) = serde_json::from_value::<Vec<MdnsService>>(ev.payload) {
                     self.mdns = list;
+                }
+            }
+            "display-list" => {
+                if let Ok(list) = serde_json::from_value::<Vec<DisplayEntry>>(
+                    ev.payload.get("displays").cloned().unwrap_or(Value::Null),
+                ) {
+                    self.displays = list;
+                }
+            }
+            "encoder-list" => {
+                if let Ok(list) = serde_json::from_value::<Vec<VideoEncoder>>(
+                    ev.payload.get("encoders").cloned().unwrap_or(Value::Null),
+                ) {
+                    self.video_encoders = list;
                 }
             }
             "reconnect-history" => self.reconnect_history(),
@@ -1024,6 +1084,41 @@ impl Ui {
         self.fetch_devices_once(true);
     }
 
+    /// Asks scrcpy which displays the selected device exposes, for the
+    /// `--display-id` picker. Silent on an empty device or in a fixture scene.
+    pub fn refresh_displays(&self) {
+        if self.fixture || self.config.device.is_empty() {
+            return;
+        }
+        let sink = self.sink.clone();
+        let device = self.config.device.clone();
+        let path = self.config.scrcpy_path.clone();
+        self.runtime.spawn(async move {
+            let value = commands::list_displays(device, path).await;
+            sink.emit("display-list", value);
+        });
+    }
+
+    /// Asks scrcpy which video encoders match the current codec, for the
+    /// `--video-encoder` picker. Re-run when the codec changes.
+    pub fn refresh_encoders(&self) {
+        if self.fixture || self.config.device.is_empty() {
+            return;
+        }
+        let sink = self.sink.clone();
+        let device = self.config.device.clone();
+        let codec = self
+            .config
+            .codec
+            .clone()
+            .unwrap_or_else(|| "h264".to_string());
+        let path = self.config.scrcpy_path.clone();
+        self.runtime.spawn(async move {
+            let value = commands::list_video_encoders(device, codec, path).await;
+            sink.emit("encoder-list", value);
+        });
+    }
+
     /// Emits a `device-poll` every 5 s; the UI thread runs a single silent
     /// fetch unless a manual refresh or connect owns the busy state.
     fn start_device_poll(&self) {
@@ -1307,9 +1402,16 @@ impl Ui {
     }
 
     pub fn select_device(&mut self, serial: String) {
+        let changed = self.config.device != serial;
         self.config.device = serial.clone();
         self.open_select = None;
         self.save_config();
+        // Display and encoder lists are device-specific; refresh them when the
+        // selection actually changes (or the lists are still empty).
+        if changed || self.displays.is_empty() || self.video_encoders.is_empty() {
+            self.refresh_displays();
+            self.refresh_encoders();
+        }
         // Selecting an idle device must not clear the active device of another
         // device that is still running (Ctrl+Alt+Shift+C would stop recentring
         // it). Only a running selection becomes authoritative here.

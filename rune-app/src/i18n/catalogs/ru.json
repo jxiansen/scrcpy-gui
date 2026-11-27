@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "Устройства не найдены. Проверьте кабель или нажмите «Обновить».",
   "sidebar.wirelessConnect": "Беспроводное подключение",
   "settings.inputGroup": "Ввод и звук",
-  "device.select": "Выберите устройство"
+  "device.select": "Выберите устройство",
+  "controlPanel.display": "Дисплей",
+  "controlPanel.displayMain": "Основной дисплей",
+  "controlPanel.videoEncoder": "Видеокодировщик",
+  "controlPanel.videoEncoderAuto": "Авто",
+  "controlPanel.gamepad": "Геймпад",
+  "controlPanel.gamepadDisabled": "Отключён",
+  "controlPanel.gamepadUhid": "UHID (виртуальный)",
+  "controlPanel.gamepadAoa": "AOA (USB)",
+  "controlPanel.noControl": "Только чтение",
+  "controlPanel.cameraHighSpeed": "Скоростная камера",
+  "sessionBehavior.recordFormat": "Формат записи",
+  "sessionBehavior.recordTimeLimit": "Ограничение времени",
+  "sessionBehavior.recordTimeLimitOff": "Без ограничения",
+  "sessionBehavior.recordNoPlayback": "Только запись"
 }

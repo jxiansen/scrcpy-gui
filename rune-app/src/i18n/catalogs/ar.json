@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "لم يتم العثور على أجهزة. تحقق من الكابل أو اضغط تحديث.",
   "sidebar.wirelessConnect": "اتصال لاسلكي",
   "settings.inputGroup": "الإدخال والصوت",
-  "device.select": "اختر جهازًا"
+  "device.select": "اختر جهازًا",
+  "controlPanel.display": "الشاشة",
+  "controlPanel.displayMain": "الشاشة الرئيسية",
+  "controlPanel.videoEncoder": "مشفّر الفيديو",
+  "controlPanel.videoEncoderAuto": "تلقائي",
+  "controlPanel.gamepad": "يد التحكم",
+  "controlPanel.gamepadDisabled": "معطّل",
+  "controlPanel.gamepadUhid": "UHID (افتراضية)",
+  "controlPanel.gamepadAoa": "AOA (USB)",
+  "controlPanel.noControl": "للقراءة فقط",
+  "controlPanel.cameraHighSpeed": "كاميرا عالية السرعة",
+  "sessionBehavior.recordFormat": "صيغة التسجيل",
+  "sessionBehavior.recordTimeLimit": "حدّ الوقت",
+  "sessionBehavior.recordTimeLimitOff": "بلا حد",
+  "sessionBehavior.recordNoPlayback": "تسجيل فقط"
 }

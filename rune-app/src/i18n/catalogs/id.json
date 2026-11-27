@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "Perangkat tidak ditemukan. Periksa kabel atau ketuk Segarkan.",
   "sidebar.wirelessConnect": "Koneksi nirkabel",
   "settings.inputGroup": "Input & audio",
-  "device.select": "Pilih perangkat"
+  "device.select": "Pilih perangkat",
+  "controlPanel.display": "Layar",
+  "controlPanel.displayMain": "Layar utama",
+  "controlPanel.videoEncoder": "Encoder video",
+  "controlPanel.videoEncoderAuto": "Otomatis",
+  "controlPanel.gamepad": "Gamepad",
+  "controlPanel.gamepadDisabled": "Nonaktif",
+  "controlPanel.gamepadUhid": "UHID (virtual)",
+  "controlPanel.gamepadAoa": "AOA (USB)",
+  "controlPanel.noControl": "Hanya baca",
+  "controlPanel.cameraHighSpeed": "Kamera cepat",
+  "sessionBehavior.recordFormat": "Format rekaman",
+  "sessionBehavior.recordTimeLimit": "Batas waktu",
+  "sessionBehavior.recordTimeLimitOff": "Tanpa batas",
+  "sessionBehavior.recordNoPlayback": "Hanya rekam"
 }

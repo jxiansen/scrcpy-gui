@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "未偵測到裝置，請檢查連線或點擊重新整理",
   "sidebar.wirelessConnect": "無線連線",
   "settings.inputGroup": "輸入與音訊",
-  "device.select": "選擇裝置"
+  "device.select": "選擇裝置",
+  "controlPanel.display": "顯示器",
+  "controlPanel.displayMain": "主顯示器",
+  "controlPanel.videoEncoder": "視訊編碼器",
+  "controlPanel.videoEncoderAuto": "自動",
+  "controlPanel.gamepad": "手把",
+  "controlPanel.gamepadDisabled": "停用",
+  "controlPanel.gamepadUhid": "UHID（虛擬手把）",
+  "controlPanel.gamepadAoa": "AOA（USB 手把）",
+  "controlPanel.noControl": "唯讀模式",
+  "controlPanel.cameraHighSpeed": "高速相機",
+  "sessionBehavior.recordFormat": "錄製格式",
+  "sessionBehavior.recordTimeLimit": "時長限制",
+  "sessionBehavior.recordTimeLimitOff": "不限制",
+  "sessionBehavior.recordNoPlayback": "僅錄製（不播放）"
 }

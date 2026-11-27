@@ -87,9 +87,9 @@ Backend events keep their old names so the ported logic stays recognisable:
   `{type:"download-progress",percent}`, throttled to at most one event per 1 %
   or 100 ms; the legacy top-level `download-progress` name is still accepted.
 - `scrcpy-window-pos` — the sampled mirror-window position.
-- Local bridge events: `device-list`, `mdns-list`, `scrcpy-check`, `adb-killed`,
-  `update-available`, `app-toast` (`{title,description}`) and `toast-expire`
-  (`{seq}`).
+- Local bridge events: `device-list`, `mdns-list`, `display-list`,
+  `encoder-list`, `scrcpy-check`, `adb-killed`, `update-available`,
+  `app-toast` (`{title,description}`) and `toast-expire` (`{seq}`).
 
 `Ui::handle_event` is the only place that turns them into state.
 

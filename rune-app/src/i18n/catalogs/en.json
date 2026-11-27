@@ -321,5 +321,19 @@
   "sidebar.noDevicesHint": "No devices found. Check the cable or tap Refresh.",
   "sidebar.wirelessConnect": "Wireless connect",
   "settings.inputGroup": "Input & audio",
-  "device.select": "Select device"
+  "device.select": "Select device",
+  "controlPanel.display": "Display",
+  "controlPanel.displayMain": "Main display",
+  "controlPanel.videoEncoder": "Video encoder",
+  "controlPanel.videoEncoderAuto": "Auto",
+  "controlPanel.gamepad": "Gamepad",
+  "controlPanel.gamepadDisabled": "Disabled",
+  "controlPanel.gamepadUhid": "UHID (virtual)",
+  "controlPanel.gamepadAoa": "AOA (USB)",
+  "controlPanel.noControl": "Read-only",
+  "controlPanel.cameraHighSpeed": "High-speed camera",
+  "sessionBehavior.recordFormat": "Recording format",
+  "sessionBehavior.recordTimeLimit": "Time limit",
+  "sessionBehavior.recordTimeLimitOff": "No limit",
+  "sessionBehavior.recordNoPlayback": "Record only"
 }
