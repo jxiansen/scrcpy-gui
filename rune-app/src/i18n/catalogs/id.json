@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "Versi baru Scrcpy (v{latest}) tersedia. Versi yang terpasang adalah v{local}. Mau update sekarang?",
   "alerts.updateBtn": "Update Sekarang",
   "alerts.cancelBtn": "Nanti",
+  "alerts.settingsSaveFailedTitle": "Penghematan Pengaturan Gagal",
+  "alerts.settingsSaveFailedDetail": "Pengaturan tidak dapat ditulis ke disk, jadi perubahan mungkin hilang saat Anda memulai ulang ScrcpyGUI.",
   "logs.noDeviceForDragDrop": "[PERINGATAN] Pilih perangkat dulu sebelum drag & drop file.",
   "logs.customScrcpyPathSet": "[SISTEM] Jalur scrcpy diatur manual ke: {path}",
   "logs.customScrcpyPathCleared": "[SISTEM] Jalur scrcpy manual dihapus. Menggunakan bawaan sistem.",

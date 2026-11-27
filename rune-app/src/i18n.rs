@@ -25,14 +25,24 @@ fn leak(s: String) -> &'static str {
 fn catalogs() -> &'static HashMap<&'static str, Dict> {
     static CATS: OnceLock<HashMap<&'static str, Dict>> = OnceLock::new();
     CATS.get_or_init(|| {
+        // `en` is the embedded source of truth and is validated by CI
+        // (`check_i18n.py`); degrade to an empty English map rather than panic
+        // a launch if it ever failed to parse.
         let en_src = CATALOG_SOURCES[0].1;
-        let en_json: serde_json::Value = serde_json::from_str(en_src).expect("en catalog");
-        let en: Dict = en_json
-            .as_object()
-            .expect("en object")
-            .iter()
-            .map(|(k, v)| (leak(k.clone()), leak(v.as_str().unwrap_or("").to_string())))
-            .collect();
+        let en: Dict = match serde_json::from_str::<serde_json::Value>(en_src) {
+            Ok(value) => value
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .map(|(k, v)| (leak(k.clone()), leak(v.as_str().unwrap_or("").to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Err(err) => {
+                eprintln!("[i18n] English catalog failed to parse: {err}");
+                Dict::new()
+            }
+        };
 
         let mut all = HashMap::new();
         all.insert("en", en.clone());
@@ -87,8 +97,17 @@ pub fn tv(locale: &str, key: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
+/// The display name for a language code in `locale`. An unknown code falls
+/// back to the code itself rather than the raw `languages.xx` key, so a stale
+/// pref never shows a raw catalog key on the trigger button.
 pub fn language_name(locale: &str, code: &str) -> &'static str {
-    t(locale, &format!("languages.{code}"))
+    let key = format!("languages.{code}");
+    let value = t(locale, &key);
+    if value == key {
+        missing_fallback(code)
+    } else {
+        value
+    }
 }
 
 #[cfg(test)]

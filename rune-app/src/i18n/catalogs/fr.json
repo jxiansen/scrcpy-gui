@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "Une nouvelle version de Scrcpy (v{latest}) est disponible. Votre version installée est v{local}. Voulez-vous mettre à jour maintenant ?",
   "alerts.updateBtn": "Mettre à jour",
   "alerts.cancelBtn": "Plus tard",
+  "alerts.settingsSaveFailedTitle": "Échec de l'enregistrement des paramètres",
+  "alerts.settingsSaveFailedDetail": "Impossible d'enregistrer vos paramètres sur le disque : vos modifications pourraient être perdues au redémarrage de ScrcpyGUI.",
   "logs.noDeviceForDragDrop": "[WARN] Aucun appareil sélectionné pour l'opération de glisser-déposer.",
   "logs.customScrcpyPathSet": "[SYSTEM] Chemin scrcpy personnalisé défini sur : {path}",
   "logs.customScrcpyPathCleared": "[SYSTEM] Chemin scrcpy personnalisé effacé. Utilisation du système par défaut.",

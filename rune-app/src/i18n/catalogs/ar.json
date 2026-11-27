@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "يتوفر إصدار جديد من Scrcpy (v{latest}). الإصدار المثبت لديك هو v{local}. هل ترغب في التحديث الآن؟",
   "alerts.updateBtn": "تحديث الآن",
   "alerts.cancelBtn": "لاحقًا",
+  "alerts.settingsSaveFailedTitle": "فشل حفظ الإعدادات",
+  "alerts.settingsSaveFailedDetail": "تعذّر كتابة الإعدادات إلى القرص، وقد تُفقد التغييرات عند إعادة تشغيل ScrcpyGUI.",
   "logs.noDeviceForDragDrop": "[تحذير] لم يتم تحديد جهاز لعملية السحب والإفلات.",
   "logs.customScrcpyPathSet": "[النظام] تم تعيين مسار Scrcpy المخصص إلى: {path}",
   "logs.customScrcpyPathCleared": "[النظام] تمت إزالة مسار Scrcpy المخصص. سيتم استخدام المسار الافتراضي.",

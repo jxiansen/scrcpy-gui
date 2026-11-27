@@ -59,8 +59,8 @@ SCENE_START = {
 }
 
 SCENE_ADVANCED_COUNT = {
-    "compare-camera": 7,
-    "compare-desktop": 10,
+    "compare-camera": 6,
+    "compare-desktop": 9,
 }
 # Mirror no longer duplicates "codec" in the advanced section.
 DEFAULT_ADVANCED_COUNT = 5

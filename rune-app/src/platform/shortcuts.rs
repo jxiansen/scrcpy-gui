@@ -8,7 +8,12 @@ use crate::ui::Ui;
 
 /// Ctrl+Alt+Shift+C: re-centre the active mirror window.
 pub fn recenter(s: &mut Ui, _tx: &mut Tx) {
-    let device = s.state.active_device.lock().unwrap().clone();
+    let device = s
+        .state
+        .active_device
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
     if let Some(device) = device {
         let _ = commands::recenter_scrcpy_window(s.state.clone(), device);
     }

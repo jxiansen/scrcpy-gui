@@ -52,14 +52,22 @@ impl EventSink {
     /// Rune hands the app a waker in `AppSpec::setup`; call it once here so
     /// backend events are seen even when Rune has no frames scheduled.
     pub fn set_waker(&self, waker: Waker) {
-        *self.waker.lock().unwrap() = Some(waker);
+        *self.waker.lock().unwrap_or_else(|p| p.into_inner()) = Some(waker);
     }
 
+    /// Clone the waker out of the lock before calling it: the callback is
+    /// framework code that may re-enter `emit` (a nested lock would deadlock),
+    /// and a panicking holder must not poison every later `emit`.
     pub fn emit(&self, name: impl Into<String>, payload: impl Serialize) {
         // The UI is gone on shutdown; dropping events is preferable to panicking
         // inside a monitor task (the old code did `.unwrap()` here).
         if self.tx.send(AppEvent::new(name, payload)).is_ok() {
-            if let Some(waker) = self.waker.lock().unwrap().as_ref() {
+            let waker = self
+                .waker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(waker) = waker {
                 waker();
             }
         }

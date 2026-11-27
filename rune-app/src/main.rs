@@ -154,6 +154,7 @@ fn main() {
     let mut app = rune::App::new(spec)
         .titlebar(rune::Titlebar::new(44.0))
         .window_options(window_options)
+        .maximized(saved_window.is_some_and(|w| w.maximized))
         .global_shortcut("ctrl+alt+shift+c", platform::shortcuts::recenter);
 
     #[cfg(target_os = "windows")]

@@ -48,11 +48,6 @@ fn is_audio_codec_error(text: &str) -> bool {
     mentions_codec && mentions_failure
 }
 
-#[allow(dead_code)] // legacy/unwired API, kept for follow-up
-pub fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
 fn binary_filename(binary_name: &str) -> String {
     let exe_ext = std::env::consts::EXE_EXTENSION;
     if exe_ext.is_empty() {
@@ -133,18 +128,26 @@ fn create_command<S: AsRef<std::ffi::OsStr>>(program: S) -> TokioCommand {
 pub async fn check_scrcpy(custom_path: Option<String>) -> serde_json::Value {
     let exe_path = get_binary_path("scrcpy", custom_path);
 
-    // Check version to verify it exists and is runnable
-    let output = create_command(&exe_path).arg("--version").output().await;
+    // Check version to verify it exists and is runnable. A wedged binary must
+    // not leave the UI's readiness state pending forever.
+    let output = timeout(
+        ADB_QUERY_TIMEOUT,
+        create_command(&exe_path).arg("--version").output(),
+    )
+    .await;
 
     match output {
-        Ok(o) if o.status.success() => {
+        Ok(Ok(o)) if o.status.success() => {
             json!({ "found": true, "message": "Scrcpy Ready" })
         }
-        Ok(_) => {
+        Ok(Ok(_)) => {
             json!({ "found": false, "message": "Failed to start scrcpy (Exit Code != 0)" })
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             json!({ "found": false, "message": "Scrcpy not found" })
+        }
+        Err(_) => {
+            json!({ "found": false, "message": "Scrcpy did not respond (timed out)" })
         }
     }
 }
@@ -276,7 +279,9 @@ async fn resolve_friendly_names(
     let mut resolved = serde_json::Map::new();
     let mut pending = Vec::new();
     {
-        let cache = friendly_names_cache().lock().unwrap();
+        let cache = friendly_names_cache()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         for serial in devices {
             if let Some(name) = cache.get(serial) {
                 resolved.insert(serial.clone(), json!(name));
@@ -298,7 +303,7 @@ async fn resolve_friendly_names(
         if let Ok((serial, Some(name))) = joined {
             friendly_names_cache()
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|p| p.into_inner())
                 .insert(serial.clone(), name.clone());
             resolved.insert(serial, json!(name));
         }
@@ -743,6 +748,10 @@ fn split_args(s: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+/// Large transfers can legitimately take minutes, but a wedged ADB must not
+/// pin the task forever.
+const ADB_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub async fn push_file(
     device: String,
     file_path: String,
@@ -750,24 +759,28 @@ pub async fn push_file(
 ) -> serde_json::Value {
     let adb_path = get_binary_path("adb", custom_path);
 
-    let output = create_command(&adb_path)
-        .arg("-s")
-        .arg(&device)
-        .arg("push")
-        .arg(&file_path)
-        .arg("/sdcard/Download/")
-        .output()
-        .await;
+    let output = timeout(
+        ADB_TRANSFER_TIMEOUT,
+        create_command(&adb_path)
+            .arg("-s")
+            .arg(&device)
+            .arg("push")
+            .arg(&file_path)
+            .arg("/sdcard/Download/")
+            .output(),
+    )
+    .await;
 
     match output {
-        Ok(o) => {
+        Ok(Ok(o)) => {
             if o.status.success() {
                 json!({ "success": true, "message": "File pushed to Downloads" })
             } else {
                 json!({ "success": false, "message": "Transfer failed" })
             }
         }
-        Err(e) => json!({ "success": false, "message": e.to_string() }),
+        Ok(Err(e)) => json!({ "success": false, "message": e.to_string() }),
+        Err(_) => json!({ "success": false, "message": "Transfer timed out" }),
     }
 }
 
@@ -778,16 +791,19 @@ pub async fn install_apk(
 ) -> serde_json::Value {
     let adb_path = get_binary_path("adb", custom_path);
 
-    let output = create_command(&adb_path)
-        .arg("-s")
-        .arg(&device)
-        .arg("install")
-        .arg(&file_path)
-        .output()
-        .await;
+    let output = timeout(
+        ADB_TRANSFER_TIMEOUT,
+        create_command(&adb_path)
+            .arg("-s")
+            .arg(&device)
+            .arg("install")
+            .arg(&file_path)
+            .output(),
+    )
+    .await;
 
     match output {
-        Ok(o) => {
+        Ok(Ok(o)) => {
             let out_text = String::from_utf8_lossy(&o.stdout);
             let err_text = String::from_utf8_lossy(&o.stderr);
 
@@ -797,7 +813,8 @@ pub async fn install_apk(
                 json!({ "success": false, "message": err_text.trim() })
             }
         }
-        Err(e) => json!({ "success": false, "message": e.to_string() }),
+        Ok(Err(e)) => json!({ "success": false, "message": e.to_string() }),
+        Err(_) => json!({ "success": false, "message": "Install timed out" }),
     }
 }
 
@@ -1059,6 +1076,44 @@ pub struct ScrcpyConfig {
 
 const HWDEC_VALUES: &[&str] = &["disabled", "vaapi", "d3d11va", "videotoolbox"];
 
+/// The SDL driver names scrcpy accepts for `--render-driver`. Like hwdec, the
+/// config value goes through an allowlist so a stale or hand-edited entry
+/// cannot pass an arbitrary flag value.
+pub const RENDER_DRIVER_VALUES: &[&str] = &[
+    "direct3d",
+    "opengl",
+    "opengles2",
+    "opengles",
+    "metal",
+    "software",
+    "vulkan",
+];
+
+/// Whether a render driver can work on this OS (metal is macOS-only, direct3d
+/// Windows-only). The UI filters its dropdown with the same rule.
+pub fn is_render_driver_allowed_on_os(driver: &str) -> bool {
+    match driver {
+        "metal" => cfg!(target_os = "macos"),
+        "direct3d" => cfg!(target_os = "windows"),
+        _ => true,
+    }
+}
+
+/// The explicit `--render-driver` value to pass, or None for SDL's default
+/// ("auto") / unknown / OS-mismatched values.
+fn resolve_render_driver_flag(config: &ScrcpyConfig) -> Option<&str> {
+    let requested = config.render_driver.as_deref()?.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    RENDER_DRIVER_VALUES
+        .iter()
+        .find(|value| {
+            value.eq_ignore_ascii_case(requested) && is_render_driver_allowed_on_os(value)
+        })
+        .copied()
+}
+
 /// `--camera-id` takes a numeric id only (0, 1, ...). Anything else is a stale
 /// or hand-edited label and must not become an arbitrary flag value.
 fn parse_camera_id(value: &str) -> Option<u32> {
@@ -1100,7 +1155,7 @@ fn sanitize_record_component(input: &str) -> String {
     }
 }
 
-fn is_hwdec_allowed_on_os(value: &str) -> bool {
+pub fn is_hwdec_allowed_on_os(value: &str) -> bool {
     match value {
         "disabled" => true,
         "vaapi" => cfg!(target_os = "linux"),
@@ -1333,8 +1388,8 @@ fn recenter_window(pid: u32) {
             SetWindowPos(
                 hwnd,
                 None,
-                (screen_w - w) / 2,
-                (screen_h - h) / 2,
+                (screen_w.saturating_sub(w)) / 2,
+                (screen_h.saturating_sub(h)) / 2,
                 0,
                 0,
                 SWP_NOSIZE | SWP_NOZORDER,
@@ -1388,8 +1443,8 @@ fn recenter_window(pid: u32) {
             return;
         };
 
-        let x = ((screen_w - w).max(0) / 2).to_string();
-        let y = ((screen_h - h).max(0) / 2).to_string();
+        let x = (screen_w.saturating_sub(w).max(0) / 2).to_string();
+        let y = (screen_h.saturating_sub(h).max(0) / 2).to_string();
         let _ = StdCommand::new("xdotool")
             .args(["windowmove", &window_id, &x, &y])
             .output();
@@ -1432,21 +1487,30 @@ fn recenter_window(pid: u32) {
 pub fn recenter_device(state: &ScrcpyState, device: &str) {
     // Live children are owned by the generation registry now; keep the
     // `ScrcpyState` map as a fallback for any child inserted by older wiring.
+    // Read the registry pid first and release its lock before touching the
+    // second mutex: no sessions -> processes lock nesting.
     let pid = registry()
         .sessions
         .lock()
-        .unwrap()
+        .unwrap_or_else(|p| p.into_inner())
         .get(device)
-        .and_then(|session| session.pid)
-        .or_else(|| {
-            state
-                .processes
-                .lock()
-                .unwrap()
-                .get(device)
-                .and_then(|c| c.id())
-        });
+        .and_then(|session| session.pid);
+    let pid = pid.or_else(|| {
+        state
+            .processes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device)
+            .and_then(|c| c.id())
+    });
     if let Some(pid) = pid {
+        // Linux/macOS shell out to xdotool/osascript, which can take hundreds
+        // of milliseconds; the global shortcut fires on the UI thread, so keep
+        // that work off it. The Windows path is a handful of instant Win32
+        // calls and stays synchronous.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        std::thread::spawn(move || recenter_window(pid));
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         recenter_window(pid);
     }
 }
@@ -1460,7 +1524,10 @@ pub fn recenter_scrcpy_window(state: Arc<ScrcpyState>, device: String) -> Result
 /// recentre shortcut (which fires with no window necessarily focused) knows
 /// which mirror window to act on.
 pub fn set_active_device(state: Arc<ScrcpyState>, device: Option<String>) -> Result<(), String> {
-    *state.active_device.lock().unwrap() = device;
+    *state
+        .active_device
+        .lock()
+        .unwrap_or_else(|p| p.into_inner()) = device;
     Ok(())
 }
 
@@ -1483,19 +1550,24 @@ fn resolve_window_pos_to_persist(
     last: (i32, i32),
 ) -> (i32, i32) {
     if let (Some((rx, ry)), Some((fx, fy))) = (requested, first) {
-        let (dx, dy) = (fx - rx, fy - ry);
+        // Prefs are user-editable; extreme values must wrap safely, not panic
+        // a debug build.
+        let (dx, dy) = (fx.saturating_sub(rx), fy.saturating_sub(ry));
         if dx.abs() <= 80 && dy.abs() <= 120 {
-            return (last.0 - dx, last.1 - dy);
+            return (last.0.saturating_sub(dx), last.1.saturating_sub(dy));
         }
     }
     last
 }
 
 /// Emits the resolved window position (when one was captured) followed by the
-/// session-stopped status. Shared by every monitor-loop exit path.
+/// session-stopped status. Shared by every monitor-loop exit path. The status
+/// carries the session's generation so the UI can drop it if a newer start
+/// already owns the device.
 fn emit_window_pos_and_stop(
     sink: &EventSink,
     device: &str,
+    generation: u64,
     requested: Option<(i32, i32)>,
     first: Option<(i32, i32)>,
     last: Option<(i32, i32)>,
@@ -1509,7 +1581,7 @@ fn emit_window_pos_and_stop(
     }
     sink.emit(
         "scrcpy-status",
-        json!({ "device": device, "running": false }),
+        json!({ "device": device, "running": false, "generation": generation }),
     );
 }
 
@@ -1550,12 +1622,9 @@ fn build_scrcpy_args(
             args.push("--mouse=uhid".to_string());
         }
 
-        if let Some(render_driver) = &config.render_driver {
-            let selected_driver = render_driver.trim();
-            if !selected_driver.is_empty() && selected_driver != "auto" {
-                args.push("--render-driver".to_string());
-                args.push(selected_driver.to_string());
-            }
+        if let Some(render_driver) = resolve_render_driver_flag(config) {
+            args.push("--render-driver".to_string());
+            args.push(render_driver.to_string());
         }
 
         if let Some(hwdec) = resolve_hwdec_flag(config) {
@@ -1775,30 +1844,46 @@ where
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // `read_until` is cancel-safe: a tick that wins the select can leave a
+    // partial line in `buf`. At EOF that remainder is still a real line (the
+    // audio error often is the last, unterminated one), so consume it too.
+    let consume = |buf: &mut Vec<u8>, batch: &mut Vec<String>| {
+        if buf.is_empty() {
+            return;
+        }
+        let line = String::from_utf8_lossy(buf)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
+        if let Some(flag) = &audio_flag {
+            if is_audio_codec_error(&line) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        if !line.is_empty() {
+            batch.push(line);
+        }
+        buf.clear();
+    };
+
     loop {
         tokio::select! {
             read = reader.read_until(b'\n', &mut buf) => {
                 match read {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        consume(&mut buf, &mut batch);
+                        break;
+                    }
                     Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf)
-                            .trim_end_matches(['\r', '\n'])
-                            .to_string();
-                        if let Some(flag) = &audio_flag {
-                            if is_audio_codec_error(&line) {
-                                flag.store(true, Ordering::SeqCst);
-                            }
-                        }
-                        if !line.is_empty() {
-                            batch.push(line);
-                        }
-                        buf.clear();
+                        consume(&mut buf, &mut batch);
                         if batch.len() >= 50 {
                             sink.emit("scrcpy-log", batch.join("\n"));
                             batch.clear();
                         }
                     }
-                    Err(_) => break,
+                    Err(_) => {
+                        consume(&mut buf, &mut batch);
+                        break;
+                    }
                 }
             }
             _ = interval.tick() => {
@@ -1900,6 +1985,9 @@ struct SessionRegistry {
     counter: AtomicU64,
     generations: Mutex<HashMap<String, u64>>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// The last sink each device's session used, kept after the session ends
+    /// so a stop with no live session can still tell the UI it is stopped.
+    sinks: Mutex<HashMap<String, EventSink>>,
     shutdown: AtomicBool,
 }
 
@@ -1912,17 +2000,28 @@ impl SessionRegistry {
     fn bump_generation(&self, device: &str) -> u64 {
         // Serialize with session insertion: a start must not be able to pass
         // its generation check and then insert after a concurrent stop.
-        let _sessions = self.sessions.lock().unwrap();
+        let _sessions = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        self.bump_generation_locked(device)
+    }
+
+    /// Bump the counter and record the new generation. The caller must already
+    /// hold the `sessions` lock (std Mutex is not reentrant), so a stop can
+    /// bump and remove in one critical section without re-locking.
+    fn bump_generation_locked(&self, device: &str) -> u64 {
         let generation = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         self.generations
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .insert(device.to_string(), generation);
         generation
     }
 
     fn current_generation(&self, device: &str) -> Option<u64> {
-        self.generations.lock().unwrap().get(device).copied()
+        self.generations
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device)
+            .copied()
     }
 
     fn is_current(&self, device: &str, generation: u64) -> bool {
@@ -1932,6 +2031,21 @@ impl SessionRegistry {
     fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
     }
+
+    fn remember_sink(&self, device: &str, sink: &EventSink) {
+        self.sinks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(device.to_string(), sink.clone());
+    }
+
+    fn last_sink(&self, device: &str) -> Option<EventSink> {
+        self.sinks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(device)
+            .cloned()
+    }
 }
 
 /// Increments and returns the current session generation for `device`.
@@ -1939,11 +2053,25 @@ pub fn next_generation(device: &str) -> u64 {
     registry().bump_generation(device)
 }
 
+/// The generation a `running` status must carry to still be authoritative.
+/// The UI drops any status older than this: a stop's `false` can arrive at the
+/// channel after a newer start's `true` (they run on different worker threads),
+/// and without the generation the stale event would flip the newer session's
+/// state. Events without a generation are legacy and always accepted.
+pub fn status_is_current(device: &str, generation: Option<u64>) -> bool {
+    match generation {
+        None => true,
+        Some(generation) => registry()
+            .current_generation(device)
+            .is_some_and(|current| generation >= current),
+    }
+}
+
 /// Whether a scrcpy session currently owns `device` (including a fallback
 /// respawn gap). Replaces the UI's separate `running` table.
 pub fn is_running(device: &str) -> bool {
     let registry = registry();
-    let sessions = registry.sessions.lock().unwrap();
+    let sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
     match sessions.get(device) {
         Some(session) => registry.current_generation(device) == Some(session.generation),
         None => false,
@@ -1953,7 +2081,10 @@ pub fn is_running(device: &str) -> bool {
 /// True when `pid` belongs to a live scrcpy session managed here. The borderless
 /// drag hook uses this instead of the old (now empty) `ScrcpyState::processes`.
 pub fn is_our_pid(pid: u32) -> bool {
-    let sessions = registry().sessions.lock().unwrap();
+    let sessions = registry()
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     sessions.values().any(|session| session.pid == Some(pid))
 }
 
@@ -1972,7 +2103,7 @@ fn should_audio_fallback(
 /// Returns `Err` when taskkill itself failed (the process may still be gone;
 /// callers confirm with `Child::wait`).
 async fn terminate_process_tree(pid: u32) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         #[cfg(target_os = "windows")]
         {
             let output = StdCommand::new(system32_tool("taskkill.exe"))
@@ -2007,9 +2138,13 @@ async fn terminate_process_tree(pid: u32) -> Result<(), String> {
                 ))
             }
         }
-    })
-    .await
-    .map_err(|e| format!("terminate task failed: {}", e))?
+    });
+    // taskkill itself can hang (a wedged RPC/CSRSS); never let a stop wait on
+    // it forever. The caller's Child::wait/start_kill confirms the exit anyway.
+    match timeout(Duration::from_secs(5), task).await {
+        Ok(joined) => joined.map_err(|e| format!("terminate task failed: {}", e))?,
+        Err(_) => Err("taskkill timed out".to_string()),
+    }
 }
 
 /// Synchronous kill used from `shutdown_all` (no runtime required).
@@ -2049,11 +2184,12 @@ async fn capture_window_pos(pid: u32) -> Option<(i32, i32)> {
 }
 
 fn emit_session_stopped(session: &Session, device: &str, fresh: Option<(i32, i32)>) {
-    let track = *session.pos.lock().unwrap();
+    let track = *session.pos.lock().unwrap_or_else(|p| p.into_inner());
     let last = fresh.or(track.last);
     emit_window_pos_and_stop(
         &session.sink,
         device,
+        session.generation,
         session.requested_pos,
         track.first,
         last,
@@ -2063,13 +2199,14 @@ fn emit_session_stopped(session: &Session, device: &str, fresh: Option<(i32, i32
 /// A monitor/stop may only publish the final `running:false` status while no
 /// newer session owns the device; otherwise a stop/start that happened while
 /// the old session was being reaped would overwrite the newer `running:true`.
+/// The check and the emit share the sessions lock, and every start/stop that
+/// changes ownership takes the same lock, so no newer `true` can slip between
+/// them; the UI's generation check covers the channel-ordering remainder.
 fn emit_session_stopped_if_owned(session: &Session, device: &str, fresh: Option<(i32, i32)>) {
     let registry = registry();
-    {
-        let sessions = registry.sessions.lock().unwrap();
-        if registry.shutdown_requested() || sessions.contains_key(device) {
-            return;
-        }
+    let sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
+    if registry.shutdown_requested() || sessions.contains_key(device) {
+        return;
     }
     emit_session_stopped(session, device, fresh);
 }
@@ -2096,7 +2233,7 @@ pub fn shutdown_all() {
     let registry = registry();
     registry.shutdown.store(true, Ordering::SeqCst);
     let sessions: Vec<(String, Session)> = {
-        let mut sessions = registry.sessions.lock().unwrap();
+        let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
         sessions.drain().collect()
     };
     for (device, mut session) in sessions {
@@ -2104,7 +2241,7 @@ pub fn shutdown_all() {
         session.cancel.store(true, Ordering::SeqCst);
         session.sink.emit(
             "scrcpy-status",
-            json!({ "device": device, "running": false }),
+            json!({ "device": device, "running": false, "generation": session.generation }),
         );
         if let Some(pid) = session.pid {
             kill_process_tree_sync(pid);
@@ -2118,10 +2255,15 @@ pub fn shutdown_all() {
 pub async fn start_scrcpy(
     device: String,
     generation: u64,
-    config: ScrcpyConfig,
+    mut config: ScrcpyConfig,
     sink: EventSink,
 ) -> Result<(), String> {
     let registry = registry();
+    // The registry key is authoritative: `-s`, the recording filename and the
+    // status events must all name the same device even if a caller passed a
+    // config whose `device` drifted.
+    config.device = device.clone();
+    registry.remember_sink(&device, &sink);
     // A stale generation (stopped, superseded, or quitting) must never spawn.
     if registry.shutdown_requested() || !registry.is_current(&device, generation) {
         return Ok(());
@@ -2197,13 +2339,26 @@ pub async fn start_scrcpy(
     // Any earlier session for this device is superseded (or a duplicate start
     // raced us): terminate it before spawning. The registry insert below also
     // refuses to overwrite an existing entry, so a live child can never be
-    // orphaned by the map.
-    let previous = registry.sessions.lock().unwrap().remove(&device);
+    // orphaned by the map. If this start turns out to be stale afterwards, the
+    // superseded session's `running:true` must still be cleared: nobody else
+    // owns its final status anymore.
+    let previous = registry
+        .sessions
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&device);
+    let superseded = previous.is_some();
     if let Some(previous) = previous {
         terminate_previous_session(previous).await;
     }
 
     if registry.shutdown_requested() || !registry.is_current(&device, generation) {
+        if superseded && !registry.shutdown_requested() {
+            sink.emit(
+                "scrcpy-status",
+                json!({ "device": device, "running": false, "generation": generation }),
+            );
+        }
         return Ok(());
     }
 
@@ -2219,11 +2374,16 @@ pub async fn start_scrcpy(
     {
         Ok(spawned) => spawned,
         Err(e) => {
-            sink.emit(
-                "scrcpy-status",
-                json!({ "device": device, "running": false }),
-            );
-            return Err(e);
+            // A stale attempt (superseded or stopped during the spawn) must
+            // not clear the newer session's running state or alert the user.
+            if !registry.shutdown_requested() && registry.is_current(&device, generation) {
+                sink.emit(
+                    "scrcpy-status",
+                    json!({ "device": device, "running": false, "generation": generation }),
+                );
+                return Err(e);
+            }
+            return Ok(());
         }
     };
 
@@ -2243,7 +2403,7 @@ pub async fn start_scrcpy(
     let mut child_opt = Some(child);
     let mut readers_opt = Some(readers);
     let inserted = {
-        let mut sessions = registry.sessions.lock().unwrap();
+        let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
         if registry.shutdown_requested()
             || !registry.is_current(&device, generation)
             || sessions.contains_key(&device)
@@ -2264,6 +2424,13 @@ pub async fn start_scrcpy(
                     pos: pos.clone(),
                 },
             );
+            // Publish `running:true` under the same lock the insert took: a
+            // concurrent stop bumps the generation under this lock, so its
+            // `false` can never be queued before this `true`.
+            sink.emit(
+                "scrcpy-status",
+                json!({ "device": device, "running": true, "generation": generation }),
+            );
             true
         }
     };
@@ -2277,11 +2444,6 @@ pub async fn start_scrcpy(
         join_readers(readers_opt.take().unwrap_or_default()).await;
         return Ok(());
     }
-
-    sink.emit(
-        "scrcpy-status",
-        json!({ "device": device, "running": true }),
-    );
 
     tokio::spawn(monitor_session(
         device,
@@ -2304,7 +2466,7 @@ pub async fn start_scrcpy(
 /// removed session so the caller can emit the final stopped status.
 fn take_placeholder(device: &str, generation: u64) -> Option<Session> {
     let registry = registry();
-    let mut sessions = registry.sessions.lock().unwrap();
+    let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
     let placeholder = sessions
         .get(device)
         .is_some_and(|slot| slot.generation == generation && slot.child.is_none());
@@ -2338,7 +2500,7 @@ async fn monitor_session(
         // window before the process exits, so a periodic sample is the only
         // way to catch a move made just before the user closes the window.
         let sample = {
-            let sessions = registry.sessions.lock().unwrap();
+            let sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
             match sessions.get(&device) {
                 Some(session) if session.generation == generation => {
                     if session.mirror_window {
@@ -2352,7 +2514,7 @@ async fn monitor_session(
         };
         if let Some((pid, pos)) = sample {
             if let Some(found) = capture_window_pos(pid).await {
-                let mut track = pos.lock().unwrap();
+                let mut track = pos.lock().unwrap_or_else(|p| p.into_inner());
                 if track.first.is_none() {
                     track.first = Some(found);
                 }
@@ -2361,7 +2523,7 @@ async fn monitor_session(
         }
 
         let exit = {
-            let mut sessions = registry.sessions.lock().unwrap();
+            let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
             let Some(session) = sessions.get_mut(&device) else {
                 return;
             };
@@ -2383,7 +2545,7 @@ async fn monitor_session(
         // Claim the entry before touching anything else: only one monitor can
         // finalise a generation, and a stop that already removed it wins.
         let Some(mut session) = ({
-            let mut sessions = registry.sessions.lock().unwrap();
+            let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
             let ours = sessions
                 .get(&device)
                 .is_some_and(|session| session.generation == generation);
@@ -2427,7 +2589,7 @@ async fn monitor_session(
             // Keep a placeholder in the registry during the 250 ms flush window:
             // a stop arriving now can still invalidate the retry.
             let placed = {
-                let mut sessions = registry.sessions.lock().unwrap();
+                let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
                 if !registry.shutdown_requested()
                     && registry.is_current(&device, generation)
                     && !sessions.contains_key(&device)
@@ -2460,7 +2622,7 @@ async fn monitor_session(
             tokio::time::sleep(AUDIO_FALLBACK_DELAY).await;
 
             let allowed = {
-                let sessions = registry.sessions.lock().unwrap();
+                let sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
                 !registry.shutdown_requested()
                     && registry.is_current(&device, generation)
                     && sessions.get(&device).is_some_and(|slot| {
@@ -2492,7 +2654,8 @@ async fn monitor_session(
                     let mut child_opt = Some(new_child);
                     let mut readers_opt = Some(new_readers);
                     let installed = {
-                        let mut sessions = registry.sessions.lock().unwrap();
+                        let mut sessions =
+                            registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
                         if registry.shutdown_requested()
                             || !registry.is_current(&device, generation)
                         {
@@ -2538,7 +2701,13 @@ async fn monitor_session(
                 }
             }
         } else {
-            if should_auto_fallback && audio_failed {
+            // Chain exhausted (or fallback disabled): the last attempt's audio
+            // error is worth surfacing. A clean exit never prints this.
+            if should_auto_fallback
+                && audio_failed
+                && !success
+                && chain_index >= AUDIO_FALLBACK_CHAIN.len()
+            {
                 sink.emit(
                     "scrcpy-log",
                     "[SYSTEM] No compatible audio codec found. Consider disabling audio forwarding."
@@ -3245,7 +3414,10 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = EventSink::new(tx);
         {
-            let mut sessions = registry().sessions.lock().unwrap();
+            let mut sessions = registry()
+                .sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             sessions.insert(
                 device.to_string(),
                 Session {
@@ -3263,7 +3435,11 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
         }
         assert!(is_running(device));
 
-        registry().sessions.lock().unwrap().remove(device);
+        registry()
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(device);
         assert!(!is_running(device));
     }
 
@@ -3274,7 +3450,10 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sink = EventSink::new(tx);
         {
-            let mut sessions = registry().sessions.lock().unwrap();
+            let mut sessions = registry()
+                .sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             sessions.insert(
                 device.to_string(),
                 Session {
@@ -3310,28 +3489,45 @@ deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  scrcpy-win64-v
 
 pub async fn stop_scrcpy(device: &str) -> Result<(), String> {
     let registry = registry();
-    // Invalidate the generation first: an in-flight start/monitor must not be
-    // able to resurrect this session after the stop.
-    registry.bump_generation(device);
-
-    // Sample the mirror window while the process is still alive, before the
-    // registry entry (and its pid) is removed. Camera/desktop sessions have no
-    // remembered mirror position, so they are skipped.
-    let snapshot = {
-        let sessions = registry.sessions.lock().unwrap();
-        sessions
-            .get(device)
-            .map(|session| (session.pid, session.mirror_window))
+    // Invalidate the generation and take the session out in one critical
+    // section. Reading the pid first and removing after an awaited capture
+    // let a stop kill a *newer* session that started while the capture ran.
+    let (generation, session) = {
+        // Hold `sessions` across the generation bump and the removal so a
+        // concurrent start cannot insert a newer session between them. Use
+        // the locked variant: `bump_generation` would re-lock this same mutex.
+        let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
+        let generation = registry.bump_generation_locked(device);
+        (generation, sessions.remove(device))
     };
-    let fresh_pos = match snapshot {
-        Some((Some(pid), true)) => capture_window_pos(pid).await,
-        _ => None,
-    };
-
-    let Some(mut session) = registry.sessions.lock().unwrap().remove(device) else {
+    let Some(mut session) = session else {
+        // Nothing live (already stopped, or a start still in flight that the
+        // bump just invalidated). Still publish `false`: the UI may be showing
+        // a stale `running:true` whose real owner is gone, and without this it
+        // would keep the Stop button forever. A newer start that inserts after
+        // the bump emits a higher-generation `true`, which wins in the UI.
+        if !registry.shutdown_requested() {
+            if let Some(sink) = registry.last_sink(device) {
+                let sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
+                if !sessions.contains_key(device) {
+                    sink.emit(
+                        "scrcpy-status",
+                        json!({ "device": device, "running": false, "generation": generation }),
+                    );
+                }
+            }
+        }
         return Ok(());
     };
     session.cancel.store(true, Ordering::SeqCst);
+
+    // Sample the mirror window while the process is still alive. The entry is
+    // already ours exclusively, so no other stop/start can race this pid.
+    // Camera/desktop sessions have no remembered mirror position.
+    let fresh_pos = match (session.pid, session.mirror_window) {
+        (Some(pid), true) => capture_window_pos(pid).await,
+        _ => None,
+    };
 
     let kill_result = match session.pid {
         Some(pid) => Some(terminate_process_tree(pid).await),
@@ -3339,17 +3535,28 @@ pub async fn stop_scrcpy(device: &str) -> Result<(), String> {
     };
 
     // Wait for and verify the exit. taskkill /F /T should be immediate; a
-    // process that ignores it falls back to Child::start_kill.
+    // process that ignores it falls back to Child::start_kill. On failure the
+    // child goes back into the registry so quit can retry the kill.
+    let mut child_back = None;
     let wait_result: Result<(), String> = if let Some(mut child) = session.child.take() {
         match timeout(Duration::from_secs(5), child.wait()).await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(format!("Failed to wait for scrcpy: {}", e)),
+            Ok(Err(e)) => {
+                child_back = Some(child);
+                Err(format!("Failed to wait for scrcpy: {}", e))
+            }
             Err(_) => {
                 let _ = child.start_kill();
                 match timeout(Duration::from_secs(2), child.wait()).await {
                     Ok(Ok(_)) => Ok(()),
-                    Ok(Err(e)) => Err(format!("Failed to kill scrcpy: {}", e)),
-                    Err(_) => Err("scrcpy did not exit after taskkill".to_string()),
+                    Ok(Err(e)) => {
+                        child_back = Some(child);
+                        Err(format!("Failed to kill scrcpy: {}", e))
+                    }
+                    Err(_) => {
+                        child_back = Some(child);
+                        Err("scrcpy did not exit after taskkill".to_string())
+                    }
                 }
             }
         }
@@ -3361,7 +3568,18 @@ pub async fn stop_scrcpy(device: &str) -> Result<(), String> {
     emit_session_stopped_if_owned(&session, device, fresh_pos);
 
     match (kill_result, wait_result) {
-        (_, Err(e)) => Err(e),
+        (_, Err(e)) => {
+            // The child would not die. Keep it (and its pid) in the registry
+            // under the bumped generation so `shutdown_all` can try again at
+            // quit instead of leaking an untracked process; `kill_on_drop`
+            // remains the last resort.
+            let mut sessions = registry.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            if !sessions.contains_key(device) {
+                session.child = child_back;
+                sessions.insert(device.to_string(), session);
+            }
+            Err(e)
+        }
         (Some(Err(e)), Ok(())) => {
             // taskkill may say "not found" for a process that exited on its own
             // between sampling and killing; Child::wait already confirmed exit.
@@ -3538,6 +3756,12 @@ fn install_extracted(staging: &Path, extract_path: &Path) -> Result<(), String> 
     if !source.join(&expected).is_file() {
         return Err(format!("Downloaded archive does not contain {}", expected));
     }
+    // A release without adb/server would "install" but never start a session.
+    for companion in [binary_filename("adb"), "scrcpy-server".to_string()] {
+        if !source.join(&companion).is_file() {
+            return Err(format!("Downloaded archive does not contain {}", companion));
+        }
+    }
 
     let parent = extract_path
         .parent()
@@ -3551,14 +3775,26 @@ fn install_extracted(staging: &Path, extract_path: &Path) -> Result<(), String> 
 
     match std::fs::rename(&source, extract_path) {
         Ok(()) => {
-            if had_old {
-                let _ = std::fs::remove_dir_all(&backup);
+            if had_old && std::fs::remove_dir_all(&backup).is_err() {
+                // A running scrcpy keeps its exe/DLL mapped on Windows; the
+                // backup stays behind but the new install is in place. Say so
+                // instead of failing the update.
+                eprintln!(
+                    "[SYSTEM] Old scrcpy install kept at {} (files still in use)",
+                    backup.display()
+                );
             }
             Ok(())
         }
         Err(e) => {
             if had_old {
-                let _ = std::fs::rename(&backup, extract_path);
+                if let Err(restore_err) = std::fs::rename(&backup, extract_path) {
+                    return Err(format!(
+                        "Failed to install scrcpy binaries: {e}. Restoring the previous install \
+                         also failed ({restore_err}); it is kept at {}",
+                        backup.display()
+                    ));
+                }
             }
             Err(format!("Failed to install scrcpy binaries: {}", e))
         }
@@ -3588,8 +3824,11 @@ async fn download_scrcpy_inner(sink: Arc<EventSink>) -> Result<(), String> {
     );
     sink.emit("scrcpy-status", json!({ "type": "downloading", "success": true, "message": format!("Fetching latest {} release...", arch_tag) }));
 
+    // Connect/TLS timeouts only; no total-request timeout so a slow but steady
+    // archive download is not killed mid-transfer.
     let client = reqwest::Client::builder()
         .user_agent("ScrcpyGui-Downloader")
+        .connect_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -3749,16 +3988,19 @@ async fn download_scrcpy_inner(sink: Arc<EventSink>) -> Result<(), String> {
     let mut downloaded: u64 = 0;
     let mut last_percent: Option<u64> = None;
     let mut last_emit = Instant::now();
-    while let Some(chunk) = download_resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Download interrupted: {}", e))?
-    {
+    loop {
+        // A stalled connection must fail the download instead of hanging the
+        // task (and the UI's busy state) forever.
+        let chunk = match timeout(Duration::from_secs(60), download_resp.chunk()).await {
+            Ok(chunk) => chunk.map_err(|e| format!("Download interrupted: {}", e))?,
+            Err(_) => return Err("Download stalled (no data for 60s)".to_string()),
+        };
+        let Some(chunk) = chunk else { break };
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("Failed to write chunk: {}", e))?;
         downloaded += chunk.len() as u64;
-        if let Some(percent) = (downloaded * 100).checked_div(total_size) {
+        if let Some(percent) = downloaded.saturating_mul(100).checked_div(total_size) {
             if should_emit_progress(last_percent, percent, last_emit.elapsed()) {
                 let (event, payload) = download_progress_event(percent);
                 sink.emit(event, payload);
@@ -3844,15 +4086,31 @@ pub async fn get_videos_dir() -> Result<String, String> {
         .ok_or_else(|| "Videos directory not found".to_string())
 }
 
+/// The report name must be a plain filename: `save_report` joins it onto the
+/// Downloads folder, so separators, `..` or an absolute path would escape it.
+fn sanitize_report_name(name: &str) -> Option<String> {
+    let file_name = Path::new(name).file_name()?.to_str()?;
+    if file_name != name
+        || file_name.is_empty()
+        || !file_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return None;
+    }
+    Some(file_name.to_string())
+}
+
 pub async fn save_report(content: String, name: String) -> Result<String, String> {
-    use std::fs;
-
+    let file_name = sanitize_report_name(&name).ok_or_else(|| "invalid report name".to_string())?;
     let downloads = super::downloads_dir().ok_or_else(|| "no Downloads folder".to_string())?;
-
-    let path = downloads.join(&name);
-    fs::write(&path, content).map_err(|e| e.to_string())?;
-
-    Ok(path.to_string_lossy().to_string())
+    let path = downloads.join(file_name);
+    let written = path.clone();
+    tokio::task::spawn_blocking(move || std::fs::write(&path, content))
+        .await
+        .map_err(|e| format!("report task failed: {}", e))?
+        .map_err(|e| e.to_string())?;
+    Ok(written.to_string_lossy().to_string())
 }
 
 #[allow(dead_code)] // legacy/unwired API, kept for follow-up
@@ -3860,7 +4118,8 @@ pub async fn get_scrcpy_bin_dir() -> Result<String, String> {
     let current_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| "Could not locate the application directory".to_string())?;
 
     let extract_path = current_dir.join("scrcpy-bin");
 
@@ -3899,6 +4158,8 @@ pub fn get_local_scrcpy_version(custom_path: Option<String>) -> Option<String> {
 pub async fn get_latest_scrcpy_version() -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("ScrcpyGui-Updater")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -3980,13 +4241,15 @@ fn compare_versions(local: &str, remote: &str) -> bool {
 
 pub async fn check_scrcpy_update(custom_path: Option<String>) -> serde_json::Value {
     // `get_local_scrcpy_version` runs `scrcpy --version` synchronously; keep it
-    // off the async reactor.
-    let local_version = match tokio::task::spawn_blocking(move || {
-        get_local_scrcpy_version(custom_path)
-    })
+    // off the async reactor and bounded so a wedged binary cannot pin the
+    // update check forever.
+    let local_version = match timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || get_local_scrcpy_version(custom_path)),
+    )
     .await
     {
-        Ok(Some(version)) => version,
+        Ok(Ok(Some(version))) => version,
         _ => {
             return json!({ "update_available": false, "local_version": null, "latest_version": null, "message": "Scrcpy not installed or not working" });
         }

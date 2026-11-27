@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "Uma nova versão do Scrcpy (v{latest}) está disponível. Sua versão instalada é v{local}. Deseja atualizar agora?",
   "alerts.updateBtn": "Atualizar Agora",
   "alerts.cancelBtn": "Mais Tarde",
+  "alerts.settingsSaveFailedTitle": "Falha ao salvar as configurações",
+  "alerts.settingsSaveFailedDetail": "Não foi possível salvar as configurações no disco, então as alterações podem ser perdidas ao reiniciar o ScrcpyGUI.",
   "logs.noDeviceForDragDrop": "[WARN] Nenhum dispositivo selecionado para a operação de arrastar e soltar.",
   "logs.customScrcpyPathSet": "[SYSTEM] Caminho personalizado do scrcpy definido como: {path}",
   "logs.customScrcpyPathCleared": "[SYSTEM] Caminho personalizado do scrcpy removido. Usando padrão do sistema.",

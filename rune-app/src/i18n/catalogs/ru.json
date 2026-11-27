@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "Доступна новая версия Scrcpy (v{latest}). Ваша установленная версия, v{local}. Хотите обновить сейчас?",
   "alerts.updateBtn": "Обновить сейчас",
   "alerts.cancelBtn": "Позже",
+  "alerts.settingsSaveFailedTitle": "Не удалось сохранить настройки",
+  "alerts.settingsSaveFailedDetail": "Не удалось записать настройки на диск, поэтому при перезапуске ScrcpyGUI изменения могут исчезнуть.",
   "logs.noDeviceForDragDrop": "[WARN] Устройство не выбрано для операции drag-and-drop.",
   "logs.customScrcpyPathSet": "[SYSTEM] Пользовательский путь к scrcpy задан: {path}",
   "logs.customScrcpyPathCleared": "[SYSTEM] Пользовательский путь к scrcpy сброшен.\nИспользуется системное значение по умолчанию.",

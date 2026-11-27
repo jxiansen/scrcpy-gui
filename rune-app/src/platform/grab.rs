@@ -78,6 +78,15 @@ fn follow_loop(state: Arc<ScrcpyState>) {
         }
 
         pump_messages();
+        // The terminating click sets GRAB_ACTIVE before the hook returns. Check
+        // it *after* pumping so a click far from the window does not drag the
+        // window to the cursor once more before the loop notices the end.
+        if !GRAB_ACTIVE.load(Ordering::SeqCst) {
+            release_hook(&mut hook);
+            GRAB_HWND.store(0, Ordering::SeqCst);
+            grabbed = None;
+            continue;
+        }
         if let Some(g) = &grabbed {
             if !g.follow_cursor(&state) {
                 GRAB_ACTIVE.store(false, Ordering::SeqCst);
@@ -118,11 +127,15 @@ impl GrabbedWindow {
             return None;
         }
         let centre = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        // Move the cursor to the window centre if we can. If that fails, the
+        // offset is derived from wherever the cursor actually is, so the first
+        // follow keeps the window in place instead of jumping to the cursor.
         let _ = unsafe { SetCursorPos(centre.0, centre.1) };
+        let (cx, cy) = cursor_pos()?;
         Some(GrabbedWindow {
             hwnd: fg,
             pid,
-            offset: (centre.0 - rect.left, centre.1 - rect.top),
+            offset: (cx - rect.left, cy - rect.top),
         })
     }
 

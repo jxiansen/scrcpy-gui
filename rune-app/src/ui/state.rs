@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rune::prefs::Prefs;
 use rune::{Taskbar, TaskbarProgress, TextEdit, Waker};
@@ -15,6 +15,18 @@ use crate::i18n::{t, tv};
 
 const PREFS_ID: &str = "com.kb.scrcpy-gui";
 
+/// Locks shared with backend tasks must survive a poisoned holder: a panicking
+/// task should degrade, not take the UI thread (or the poll loops) with it.
+trait LockAlive<T> {
+    fn lock_alive(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> LockAlive<T> for Mutex<T> {
+    fn lock_alive(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Device {
     pub serial: String,
@@ -24,7 +36,6 @@ pub struct Device {
 }
 
 impl Device {
-    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn label(&self) -> &str {
         if let Some(name) = &self.friendly {
             return name;
@@ -111,6 +122,10 @@ pub struct SavedWindow {
     pub w: u32,
     pub h: u32,
     pub scale: f32,
+    /// Whether the window was maximized when saved; `x/y/w/h` then hold the
+    /// *normal* (restore) frame. Older saves lack the field and read as false.
+    #[serde(default)]
+    pub maximized: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -131,10 +146,20 @@ pub struct UpdateInfo {
 struct ScrcpyCheck {
     found: bool,
     message: String,
+    /// The folder this check queried; present on new payloads so a stale
+    /// result can be dropped. Ignored here (compared before deserialising).
+    #[serde(default)]
+    #[allow(dead_code)]
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct WindowPos {
+    /// The session that sampled the position. Several devices can mirror at
+    /// once; only the selected device's position may become the remembered
+    /// launch position. Optional so an older payload still parses.
+    #[serde(default)]
+    device: Option<String>,
     x: i32,
     y: i32,
 }
@@ -160,7 +185,8 @@ pub struct Ui {
     pub transport: Transport,
     #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub adb_menu: bool,
-    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
+    /// The kill-adb confirmation dialog flag; read by the end-adb dialog and
+    /// the disconnect flow.
     pub confirm_kill_adb: bool,
     /// The "disconnect this device?" confirmation dialog.
     pub disconnect_confirm: bool,
@@ -191,13 +217,20 @@ pub struct Ui {
     pub is_refreshing: bool,
     pub connecting: bool,
     pub pairing: bool,
-    #[allow(dead_code)] // legacy/unwired API, kept for follow-up
+    /// Whether the file-drop overlay is currently highlighted.
     pub drop_hover: bool,
     pub remember_position: bool,
     busy: Arc<AtomicBool>,
     /// Guards the 5 s single-pass fetch so a slow ADB call cannot stack a
     /// second poll on top of it.
     polling: Arc<AtomicBool>,
+    /// The pending refresh is coalesced: requests arriving while a settle loop
+    /// runs (connect success, path change, tray) set this instead of being
+    /// dropped, and the loop runs one more pass after finishing. The path is
+    /// re-read from the shared config snapshot so a path change mid-refresh
+    /// is picked up by the extra pass.
+    refresh_pending: Arc<AtomicBool>,
+    refresh_path: Arc<Mutex<Option<String>>>,
     friendly_names: Arc<Mutex<HashMap<String, String>>>,
     last_device_sig: Arc<Mutex<String>>,
     pub dark: bool,
@@ -215,6 +248,9 @@ pub struct Ui {
     update_checked: bool,
     update_path: Option<String>,
     pub download: Download,
+    /// Whether a prefs write failed at least once this run; failures are
+    /// reported once so the alert is not spammed by every save.
+    prefs_failed: bool,
     /// The custom `scrcpy_path` a download replaced. If the download fails, the
     /// old install is still the working one and the path is put back.
     download_prev_path: Option<Option<String>>,
@@ -293,6 +329,8 @@ impl Default for Ui {
             remember_position,
             busy: Arc::new(AtomicBool::new(false)),
             polling: Arc::new(AtomicBool::new(false)),
+            refresh_pending: Arc::new(AtomicBool::new(false)),
+            refresh_path: Arc::new(Mutex::new(None)),
             friendly_names: Arc::new(Mutex::new(HashMap::new())),
             last_device_sig: Arc::new(Mutex::new(String::new())),
             dark,
@@ -309,7 +347,18 @@ impl Default for Ui {
             download_prev_path: None,
             waker: None,
             fixture: false,
+            prefs_failed: false,
         }
+    }
+}
+
+/// Resets a busy flag even when the task panics or is cancelled: without this
+/// one wedged fetch would disable refreshing for the rest of the run.
+struct FlagGuard(Arc<AtomicBool>);
+
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -415,7 +464,12 @@ impl Ui {
             "scrcpy-status" => self.handle_status(&ev.payload),
             "download-progress" => self.handle_download_progress(&ev.payload),
             "scrcpy-check" => {
-                if let Ok(v) = serde_json::from_value::<ScrcpyCheck>(ev.payload) {
+                // Drop a stale check: it names the folder it queried, and the
+                // user may have switched folders while it ran.
+                let queried = ev.payload.get("path").and_then(Value::as_str);
+                let stale = ev.payload.get("path").is_some()
+                    && queried != self.config.scrcpy_path.as_deref();
+                if !stale && let Ok(v) = serde_json::from_value::<ScrcpyCheck>(ev.payload) {
                     self.scrcpy_ok = Some(v.found);
                     self.scrcpy_message = v.message;
                     if v.found {
@@ -436,6 +490,10 @@ impl Ui {
             "scrcpy-window-pos" => {
                 if self.remember_position
                     && let Ok(pos) = serde_json::from_value::<WindowPos>(ev.payload)
+                    && pos
+                        .device
+                        .as_deref()
+                        .is_none_or(|device| device == self.config.device)
                 {
                     self.config.window_x = Some(pos.x);
                     self.config.window_y = Some(pos.y);
@@ -447,7 +505,7 @@ impl Ui {
                     // Keep names learned by earlier passes even if this payload
                     // only carries adb's model fields.
                     {
-                        let mut names = self.friendly_names.lock().unwrap();
+                        let mut names = self.friendly_names.lock_alive();
                         for device in &mut devices {
                             match device.friendly.clone() {
                                 Some(name) => {
@@ -472,10 +530,8 @@ impl Ui {
                     self.refresh_mdns();
                 }
             }
-            "refresh-done" => {
-                self.is_refreshing = false;
-                self.connecting = false;
-            }
+            "refresh-done" => self.is_refreshing = false,
+            "connect-done" => self.connecting = false,
             "pair-done" => self.pairing = false,
             "history-add" => {
                 if let Ok(v) = serde_json::from_value::<IpPayload>(ev.payload) {
@@ -541,6 +597,14 @@ impl Ui {
             p.get("device").and_then(Value::as_str),
             p.get("running").and_then(Value::as_bool),
         ) {
+            // Start and stop run on different worker threads; a stale stop's
+            // `false` can reach the channel after a newer start's `true`. The
+            // backend stamps each status with its session generation and the
+            // registry knows the current one: drop anything older.
+            let generation = p.get("generation").and_then(Value::as_u64);
+            if !commands::status_is_current(device, generation) {
+                return;
+            }
             if running {
                 self.running.insert(device.to_string(), true);
             } else {
@@ -665,7 +729,33 @@ impl Ui {
         if self.fixture {
             return;
         }
-        let _ = self.prefs.set("config", &self.config);
+        if let Err(e) = self.prefs.set("config", &self.config) {
+            self.note_prefs_error(e);
+        }
+    }
+
+    /// Persist one key, reporting a failure once instead of silently
+    /// discarding the write (the value still lives in memory this run).
+    /// Takes the value by value so callers can pass `self.field.clone()`
+    /// without the immutable field borrow colliding with the `&mut self`.
+    fn persist<T: Serialize>(&mut self, key: &str, value: T) {
+        if let Err(e) = self.prefs.set(key, &value) {
+            self.note_prefs_error(e);
+        }
+    }
+
+    /// A prefs write that failed (read-only disk, quota, serialization): the
+    /// setting is kept in memory for this run but the user must be told,
+    /// otherwise the app silently loses every change at the next restart.
+    fn note_prefs_error(&mut self, error: rune::prefs::PrefsError) {
+        if self.prefs_failed {
+            return;
+        }
+        self.prefs_failed = true;
+        self.log(format!("[SYSTEM] Settings could not be saved: {error}"));
+        let title = t(&self.locale, "alerts.settingsSaveFailedTitle");
+        let detail = t(&self.locale, "alerts.settingsSaveFailedDetail");
+        self.alert = Some(format!("{title}\n\n{detail}"));
     }
 
     pub fn set_color_mode(&mut self, mode: &str, system_dark: bool) {
@@ -678,8 +768,8 @@ impl Ui {
         if self.fixture {
             return;
         }
-        let _ = self.prefs.set("color_mode", &self.color_mode);
-        let _ = self.prefs.set("dark", &self.dark);
+        self.persist("color_mode", self.color_mode.clone());
+        self.persist("dark", self.dark);
     }
 
     /// Whether the UI paints dark for the current mode; `system` asks the window.
@@ -696,13 +786,13 @@ impl Ui {
         if self.fixture {
             return;
         }
-        let _ = self.prefs.set("locale", &self.locale);
+        self.persist("locale", self.locale.clone());
     }
 
     /// The GUI window's pin; independent of scrcpy's `config.always_on_top`.
     pub fn toggle_panel_on_top(&mut self) {
         self.panel_on_top = !self.panel_on_top;
-        let _ = self.prefs.set("panel_on_top", &self.panel_on_top);
+        self.persist("panel_on_top", self.panel_on_top);
         crate::platform::window::set_always_on_top(self.panel_on_top);
     }
 
@@ -748,29 +838,50 @@ impl Ui {
     }
 
     /// Saves the window's place before it closes; `on_close` and `on_quit` both
-    /// call this, so a tray Quit keeps the last on-screen position too.
+    /// call this, so a tray Quit keeps the last on-screen position too. While
+    /// minimized/maximized the live frame is not the normal frame (Windows
+    /// reports -32000 for a minimized window), so the system's restore record
+    /// is saved instead. The in-memory copy is updated too: a tray reopen
+    /// re-applies `window_placement`, which must be this save, not the value
+    /// loaded at startup.
     pub fn save_window_placement(&mut self) {
         let Some(place) = crate::platform::window::placement() else {
             return;
         };
-        let saved = SavedWindow {
-            x: place.position.0,
-            y: place.position.1,
-            w: place.content_size.0,
-            h: place.content_size.1,
-            scale: place.scale as f32,
+        let ((x, y), (w, h)) = if place.minimized || place.maximized {
+            place
+                .restore
+                .unwrap_or((place.position, place.content_size))
+        } else {
+            (place.position, place.content_size)
         };
-        let _ = self.prefs.set("window", &saved);
+        let saved = SavedWindow {
+            x,
+            y,
+            w,
+            h,
+            scale: place.scale as f32,
+            maximized: place.maximized,
+        };
+        self.window_placement = Some(saved);
+        if let Err(e) = self.prefs.set("window", &saved) {
+            self.note_prefs_error(e);
+        }
     }
 
     /// Stops every device's scrcpy process, as the tray menu's "Stop all" does.
-    pub fn stop_all(&self) {
-        let devices: Vec<String> = self
+    /// The selected device is included even when its `running:true` has not
+    /// arrived yet, so a start in flight is cancelled too.
+    pub fn stop_all(&mut self) {
+        let mut devices: Vec<String> = self
             .running
             .iter()
             .filter(|(_, live)| **live)
             .map(|(device, _)| device.clone())
             .collect();
+        if !self.config.device.is_empty() && !devices.contains(&self.config.device) {
+            devices.push(self.config.device.clone());
+        }
         for device in devices {
             self.stop_session(&device);
         }
@@ -785,7 +896,7 @@ impl Ui {
             .chain(self.history.iter().filter(|v| **v != ip).cloned())
             .take(10)
             .collect();
-        let _ = self.prefs.set("history", &self.history);
+        self.persist("history", self.history.clone());
     }
 
     pub fn toggle_remember_position(&mut self) {
@@ -793,7 +904,7 @@ impl Ui {
         if self.fixture {
             return;
         }
-        let _ = self.prefs.set("remember_position", &self.remember_position);
+        self.persist("remember_position", self.remember_position);
         if !self.remember_position {
             self.config.window_x = None;
             self.config.window_y = None;
@@ -804,7 +915,7 @@ impl Ui {
     #[allow(dead_code)] // legacy/unwired API, kept for follow-up
     pub fn clear_history(&mut self) {
         self.history.clear();
-        let _ = self.prefs.set("history", &self.history);
+        self.persist("history", self.history.clone());
     }
 
     pub fn check_scrcpy(&self) {
@@ -814,16 +925,18 @@ impl Ui {
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         self.runtime.spawn(async move {
-            let v = commands::check_scrcpy(path).await;
+            let v = commands::check_scrcpy(path.clone()).await;
             let found = v.get("found").and_then(Value::as_bool).unwrap_or(false);
             let message = v
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // Carry the queried path: a slow check of an old folder must not
+            // overwrite the readiness state of the folder now configured.
             sink.emit(
                 "scrcpy-check",
-                serde_json::json!({ "found": found, "message": message }),
+                serde_json::json!({ "found": found, "message": message, "path": path }),
             );
         });
     }
@@ -833,7 +946,10 @@ impl Ui {
     /// This is the single-pass path used by the 5 s poll and `refresh_mdns`;
     /// the settle loop drives the same `fetch_and_emit`.
     fn fetch_devices_once(&self, silent: bool) {
-        if self.fixture || self.polling.swap(true, Ordering::SeqCst) {
+        if self.fixture
+            || self.busy.load(Ordering::SeqCst)
+            || self.polling.swap(true, Ordering::SeqCst)
+        {
             return;
         }
         let sink = self.sink.clone();
@@ -842,38 +958,59 @@ impl Ui {
         let last_sig = self.last_device_sig.clone();
         let polling = self.polling.clone();
         self.runtime.spawn(async move {
+            let _guard = FlagGuard(polling);
             fetch_and_emit(&sink, path, &last_sig, &names, silent).await;
-            polling.store(false, Ordering::SeqCst);
         });
     }
 
     /// Manual refresh: up to 8 silent passes, 2 s apart, until the device set
     /// stops changing (mirrors `refreshDevicesUntilSettled` in the old hook).
+    /// The whole loop is bounded so a wedged ADB cannot disable the refresh
+    /// button for minutes on end.
     pub fn refresh_devices(&mut self) {
-        if self.fixture || self.busy.swap(true, Ordering::SeqCst) {
+        if self.fixture {
+            return;
+        }
+        *self.refresh_path.lock_alive() = self.config.scrcpy_path.clone();
+        if self.busy.swap(true, Ordering::SeqCst) {
+            // A settle loop is already running; ask it to run one more pass
+            // with the current config instead of dropping this request.
+            self.refresh_pending.store(true, Ordering::SeqCst);
             return;
         }
         self.is_refreshing = true;
         let sink = self.sink.clone();
         let busy = self.busy.clone();
+        let pending = self.refresh_pending.clone();
+        let refresh_path = self.refresh_path.clone();
         let sig = self.last_device_sig.clone();
         let names = self.friendly_names.clone();
-        let path = self.config.scrcpy_path.clone();
+        let mut path = self.config.scrcpy_path.clone();
         self.runtime.spawn(async move {
-            let mut previous = String::new();
-            for i in 0..=8 {
-                let ok = fetch_and_emit(&sink, path.clone(), &sig, &names, true).await;
-                let current = sig.lock().unwrap().clone();
-                if !ok || current == previous {
+            let _guard = FlagGuard(busy);
+            loop {
+                let settle = async {
+                    let mut previous = String::new();
+                    for i in 0..=8 {
+                        let ok = fetch_and_emit(&sink, path.clone(), &sig, &names, true).await;
+                        let current = sig.lock_alive().clone();
+                        if !ok || current == previous {
+                            break;
+                        }
+                        previous = current;
+                        if i < 8 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                };
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(45), settle).await;
+                if !pending.swap(false, Ordering::SeqCst) {
                     break;
                 }
-                previous = current;
-                if i < 8 {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
+                // A queued request may carry a newer custom path.
+                path = refresh_path.lock_alive().clone();
             }
             sink.emit("refresh-done", serde_json::json!({}));
-            busy.store(false, Ordering::SeqCst);
         });
     }
 
@@ -952,6 +1089,12 @@ impl Ui {
 
     pub fn connect(&mut self, ip: String) {
         self.open_select = None;
+        // Enter submits even when the button is disabled; an empty address
+        // would spawn a pointless `adb connect ""`.
+        let ip = ip.trim().to_string();
+        if ip.is_empty() {
+            return;
+        }
         let sink = self.sink.clone();
         let path = self.config.scrcpy_path.clone();
         // A cancel or a newer connect bumps the token: a stale ADB attempt can
@@ -960,7 +1103,8 @@ impl Ui {
         let connect_token = self.connect_token.clone();
         let timeout_title = t(&self.locale, "toast.connectTimeout").to_string();
         let ip_label = ip.clone();
-        self.is_refreshing = true;
+        // `connecting` alone drives the connect spinner/cancel; a concurrent
+        // device refresh must neither show nor clear it (and vice versa).
         self.connecting = true;
         self.runtime.spawn(async move {
             let current = || connect_token.load(Ordering::SeqCst) == token;
@@ -1024,30 +1168,28 @@ impl Ui {
             let timed_out = tokio::time::timeout(limit, attempt).await.is_err();
             if timed_out {
                 if current() {
-                    // The future is dropped here; `refresh-done` resets the
-                    // spinner through `handle_event`, like a normal completion.
                     sink.emit(
                         "app-toast",
                         serde_json::json!({ "title": timeout_title, "description": ip_label }),
                     );
-                    sink.emit("refresh-done", serde_json::json!({}));
+                    sink.emit("connect-done", serde_json::json!({}));
                 }
             } else {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 if current() {
-                    sink.emit("refresh-done", serde_json::json!({}));
+                    sink.emit("connect-done", serde_json::json!({}));
                 }
             }
         });
     }
 
-    /// Cancels an in-flight `connect`: clears the busy flags now, shows the
-    /// cancelled toast, and invalidates the ADB task so it stays silent.
+    /// Cancels an in-flight `connect`: clears the connect flag now, shows the
+    /// cancelled toast, and invalidates the ADB task so it stays silent. A
+    /// concurrent device refresh keeps its own spinner.
     pub fn cancel_connect(&mut self) {
         self.connect_token.fetch_add(1, Ordering::SeqCst);
-        let was_connecting = self.connecting || self.is_refreshing;
+        let was_connecting = self.connecting;
         self.connecting = false;
-        self.is_refreshing = false;
         if was_connecting {
             let title = t(&self.locale, "toast.connectCancelled").to_string();
             let detail = self.ip.text.trim().to_string();
@@ -1073,15 +1215,16 @@ impl Ui {
         });
     }
 
-    /// Clears the selected device, stopping its session first if it is running.
+    /// Clears the selected device, stopping its session first. The stop is
+    /// unconditional (when a device is selected): a start still in flight is
+    /// invisible to `session_live`, and only `stop_scrcpy`'s generation bump
+    /// can cancel it before it spawns an untracked mirror.
     pub fn disconnect_device(&mut self) {
         let serial = self.config.device.clone();
         if serial.is_empty() {
             return;
         }
-        if self.session_live(&serial) {
-            self.stop_session(&serial);
-        }
+        self.stop_session(&serial);
         self.config.device.clear();
         self.open_select = None;
         self.save_config();
@@ -1186,6 +1329,12 @@ impl Ui {
             self.alert = Some(t(&self.locale, "alerts.noDeviceSelectedMessage").to_string());
             return;
         }
+        // A second click before `running:true` arrives must not spawn a second
+        // scrcpy (the backend would supersede the first, but the churn races
+        // the status events). The backend registry is authoritative here.
+        if self.session_live(&self.config.device) {
+            return;
+        }
         if self.scrcpy_ok == Some(false) {
             let message = if self.scrcpy_message.is_empty() {
                 t(&self.locale, "alerts.noDeviceSelectedMessage").to_string()
@@ -1225,8 +1374,12 @@ impl Ui {
         });
     }
 
-    pub fn stop_session(&self, device: &str) {
+    pub fn stop_session(&mut self, device: &str) {
         let sink = self.sink.clone();
+        // Optimistic: the Stop button flips back immediately and cannot get
+        // stuck if the backend's stopped event is lost. A live session's
+        // authoritative `false` follows from `stop_scrcpy`.
+        self.running.remove(device);
         if self.config.device == device {
             self.set_active_device(None);
         }
@@ -1254,16 +1407,10 @@ impl Ui {
         self.save_config();
         let sink = self.sink.clone();
         self.runtime.spawn(async move {
-            if let Err(e) = commands::download_scrcpy(sink.clone()).await {
-                sink.emit(
-                    "scrcpy-status",
-                    serde_json::json!({
-                        "type": "download-complete",
-                        "success": false,
-                        "message": e,
-                    }),
-                );
-            }
+            // `commands::download_scrcpy` emits the single `download-complete`
+            // failure event itself; emitting another here ran the failure
+            // handling twice and could clobber a retry started in between.
+            let _ = commands::download_scrcpy(sink).await;
         });
     }
 
@@ -1330,10 +1477,15 @@ impl Ui {
         });
     }
 
-    pub fn handle_file(&self, path: std::path::PathBuf) {
-        let sink = self.sink.clone();
+    pub fn handle_file(&mut self, path: std::path::PathBuf) {
         let device = self.config.device.clone();
+        if device.trim().is_empty() {
+            self.log(t(&self.locale, "logs.noDeviceForDragDrop").to_string());
+            return;
+        }
+        let sink = self.sink.clone();
         let custom = self.config.scrcpy_path.clone();
+        let locale = self.locale.clone();
         let text = path.to_string_lossy().to_string();
         self.runtime.spawn(async move {
             let apk = text.to_lowercase().ends_with(".apk");
@@ -1344,7 +1496,7 @@ impl Ui {
             };
             sink.emit(
                 "scrcpy-log",
-                tv("zh-CN", key, &[("device", &device), ("filePath", &text)]),
+                tv(&locale, key, &[("device", &device), ("filePath", &text)]),
             );
             let v = if apk {
                 commands::install_apk(device, text, custom).await
@@ -1410,6 +1562,7 @@ impl Ui {
             chrono::Utc::now().timestamp_millis()
         );
         let sink = self.sink.clone();
+        let locale = self.locale.clone();
         let content = serde_json::to_string_pretty(&payload).unwrap_or_default();
         let toast_title = t(&self.locale, "logPanel.report").to_string();
         let toast_detail = tv(
@@ -1428,7 +1581,7 @@ impl Ui {
                         }),
                     );
                     tv(
-                        "zh-CN",
+                        &locale,
                         "logPanel.diagnosticReportSaved",
                         &[("fileName", &name), ("path", &path)],
                     )
@@ -1476,7 +1629,7 @@ fn merge_backend_friendly(v: &Value, names: &Arc<Mutex<HashMap<String, String>>>
         let Some(map) = v.get(key).and_then(Value::as_object) else {
             continue;
         };
-        let mut cache = names.lock().unwrap();
+        let mut cache = names.lock_alive();
         for (serial, name) in map {
             if let Some(name) = name.as_str().filter(|name| !name.trim().is_empty()) {
                 cache.insert(serial.clone(), name.trim().to_string());
@@ -1586,7 +1739,7 @@ async fn fetch_and_emit(
 
     merge_backend_friendly(&v, names);
     let devices = {
-        let cache = names.lock().unwrap();
+        let cache = names.lock_alive();
         devices_from_payload(&v, &cache)
     };
 
@@ -1596,7 +1749,7 @@ async fn fetch_and_emit(
         .collect::<Vec<_>>()
         .join(",");
 
-    let previous = last_sig.lock().unwrap().clone();
+    let previous = last_sig.lock_alive().clone();
     let previous_mdns_sig = previous
         .split_once('#')
         .map(|(_, mdns)| mdns.to_string())
@@ -1634,7 +1787,7 @@ async fn fetch_and_emit(
         previous_mdns_sig
     };
 
-    *last_sig.lock().unwrap() = format!("{device_sig}#{mdns_sig}");
+    *last_sig.lock_alive() = format!("{device_sig}#{mdns_sig}");
     sink.emit("device-list", devices);
     if mdns_ok {
         sink.emit("mdns-list", services);
@@ -1798,7 +1951,7 @@ mod tests {
         });
         merge_backend_friendly(&payload, &names);
         let devices = {
-            let cache = names.lock().unwrap();
+            let cache = names.lock_alive();
             devices_from_payload(&payload, &cache)
         };
         assert_eq!(devices[0].friendly.as_deref(), Some("Galaxy S23"));

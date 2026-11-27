@@ -254,6 +254,8 @@
   "alerts.updateAvailableMessage": "A new version of Scrcpy (v{latest}) is available. Your installed version is v{local}. Would you like to update now?",
   "alerts.updateBtn": "Update Now",
   "alerts.cancelBtn": "Later",
+  "alerts.settingsSaveFailedTitle": "Settings Save Failed",
+  "alerts.settingsSaveFailedDetail": "Could not save your settings to disk, so changes may be lost when you restart ScrcpyGUI.",
   "logs.noDeviceForDragDrop": "[WARN] No device selected for drag-and-drop operation.",
   "logs.customScrcpyPathSet": "[SYSTEM] Custom scrcpy path set to: {path}",
   "logs.customScrcpyPathCleared": "[SYSTEM] Custom scrcpy path cleared. Using system default.",

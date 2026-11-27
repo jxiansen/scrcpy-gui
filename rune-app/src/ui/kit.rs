@@ -14,6 +14,7 @@ use rune_kit::{
 use rune_theme_opencode as theme;
 
 use crate::backend::ScrcpyConfig;
+use crate::backend::commands;
 use crate::i18n::{language_name, t, tv};
 use crate::icons;
 use crate::ui::Ui;
@@ -23,13 +24,40 @@ const FPS: &[&str] = &["Auto", "30", "60", "90", "120"];
 const RES: &[&str] = &["0", "3840", "2560", "1920", "1600", "1280", "1024", "800"];
 const ROT: &[&str] = &["0", "270", "90", "180"];
 const CODEC: &[&str] = &["h264", "h265", "av1", "vp8", "vp9"];
-const RENDERERS: &[&str] = &["Auto", "swiftshader", "native"];
-const HWDEC: &[&str] = &["auto", "disabled", "d3d11va", "vaapi", "videotoolbox"];
 const ASPECT: &[&str] = &["0", "16:9", "4:3"];
 const AUDIO_CODEC: &[&str] = &["auto", "opus", "aac", "flac", "raw"];
 const LENSES: &[&str] = &["Auto Select", "Back", "Front", "External"];
 const PRESETS: &[&str] = &["Custom", "1080p", "1440p", "4K", "21:9"];
 const LOCALES: &[&str] = &["en", "fr", "pt-BR", "zh-CN", "zh-TW", "ru", "id", "ar"];
+
+/// `Auto` plus the scrcpy `--render-driver` values legal on this OS, mirroring
+/// the backend allowlist. `swiftshader`/`native` are not SDL driver names; the
+/// old static list sent illegal values that scrcpy ignored.
+fn renderer_options() -> Vec<&'static str> {
+    let mut opts = vec!["Auto"];
+    for driver in commands::RENDER_DRIVER_VALUES {
+        if commands::is_render_driver_allowed_on_os(driver) {
+            opts.push(driver);
+        }
+    }
+    opts
+}
+
+/// `--hwdec` options legal on this OS. `resolve_hwdec_flag` already drops a
+/// cross-platform value, but showing it invites a silent no-op.
+fn hwdec_options() -> Vec<&'static str> {
+    let mut opts = vec!["auto", "disabled"];
+    if cfg!(target_os = "windows") {
+        opts.push("d3d11va");
+    }
+    if cfg!(target_os = "linux") {
+        opts.push("vaapi");
+    }
+    if cfg!(target_os = "macos") {
+        opts.push("videotoolbox");
+    }
+    opts
+}
 
 fn tr(s: &Ui, key: &str) -> &'static str {
     t(&s.locale, key)
@@ -37,6 +65,13 @@ fn tr(s: &Ui, key: &str) -> &'static str {
 
 fn flip(field: &mut Option<bool>, fallback: bool) {
     *field = Some(!field.unwrap_or(fallback));
+}
+
+/// Whether a device serial is wireless: an `ip:port` from `adb connect`, or the
+/// mDNS form `adb-<instance>._adb-tls-connect._tcp`. A plain `adb-` mDNS serial
+/// has no colon, so the old `contains(':')` check mislabeled it USB.
+fn is_wireless_serial(serial: &str) -> bool {
+    serial.contains(':') || serial.contains("_adb-tls-") || serial.starts_with("adb-")
 }
 
 fn preset_name(w: u32, h: u32) -> &'static str {
@@ -660,7 +695,7 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
         k,
         layer,
         "renderer",
-        RENDERERS,
+        &renderer_options(),
         s.config.render_driver.as_deref().unwrap_or("Auto"),
         "controlPanel.graphicsRenderer",
     )));
@@ -669,7 +704,7 @@ fn advanced_selects(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> Vec<El> {
         k,
         layer,
         "hwdec",
-        HWDEC,
+        &hwdec_options(),
         s.config.hwdec.as_deref().unwrap_or("auto"),
         "controlPanel.hardwareDecoding",
     )));
@@ -728,11 +763,13 @@ fn advanced_content(s: &Ui, k: &Kit, layer: &mut Vec<El>) -> El {
 fn advanced_count(s: &Ui) -> usize {
     // The badge mirrors the advanced body per tab: `advanced_selects` builds the
     // selector row, `advanced_content` adds bitrate/background rows and
-    // `advanced_switches` the toggles. Update this total together with them.
+    // `advanced_switches` the toggles. Mirror: rotation/renderer/hwdec + vsync +
+    // ignore-constraints = 5. Camera adds bitrate = 6. Desktop adds fps,
+    // bitrate, background, flex = 9.
     match s.tab {
         SessionKind::Mirror => 5,
-        SessionKind::Camera => 7,
-        SessionKind::Desktop => 10,
+        SessionKind::Camera => 6,
+        SessionKind::Desktop => 9,
     }
 }
 
@@ -998,7 +1035,7 @@ fn device_head(s: &Ui, k: &Kit) -> El {
             .find(|d| d.serial == s.config.device)
             .map(|d| d.label().to_string())
             .unwrap_or_else(|| s.config.device.clone());
-        let transport = if s.config.device.contains(':') {
+        let transport = if is_wireless_serial(&s.config.device) {
             tr(s, "sidebar.wifi")
         } else {
             tr(s, "sidebar.usb")
@@ -1076,7 +1113,7 @@ fn action_summary(s: &Ui, k: &Kit) -> El {
                 .truncate(),
         );
     if !empty {
-        let transport = if s.config.device.contains(':') {
+        let transport = if is_wireless_serial(&s.config.device) {
             tr(s, "sidebar.wifi")
         } else {
             tr(s, "sidebar.usb")
@@ -1448,7 +1485,7 @@ fn rail(s: &Ui, k: &Kit) -> El {
     }
     for device in &s.devices {
         let serial = device.serial.clone();
-        let transport = if serial.contains(':') {
+        let transport = if is_wireless_serial(&serial) {
             tr(s, "sidebar.wifi")
         } else {
             tr(s, "sidebar.usb")
@@ -1564,7 +1601,8 @@ fn drawer_appearance(s: &Ui, k: &Kit, _layer: &mut Vec<El>, system_dark: bool) -
         _ => 2,
     };
     // rune-kit's Select popup is clipped to 50 px inside the drawer by
-    // anchored_fit, so language selection opens a full Dialog instead.
+    // anchored_fit, so language selection uses the same light anchored panel
+    // as the other `select_control` dropdowns (see `locale_options`).
     let language = Button::new(language_name(&s.locale, &s.locale))
         .variant(ButtonVariant::GhostMuted)
         .control_size(ControlSize::Regular)
@@ -2103,7 +2141,10 @@ fn connect_dialog(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
 }
 
 fn locale_options(s: &Ui, k: &Kit, layer: &mut Vec<El>) {
-    if s.open_select.as_deref() != Some("locale") {
+    // The language list lives inside the settings drawer: without this guard a
+    // future code path that closes the drawer without clearing `open_select`
+    // would leave a panel anchored to a trigger that no longer exists.
+    if !s.settings_open || s.open_select.as_deref() != Some("locale") {
         return;
     }
     layer.push(
